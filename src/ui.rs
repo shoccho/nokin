@@ -53,11 +53,18 @@ mod linux {
         path: PathBuf,
         page: Widget,
         editor: scintilla::Editor,
+        is_binary: bool,
+    }
+
+    struct CloseTabData {
+        state: *mut AppState,
+        page: Widget,
     }
 
     struct AppState {
         root: PathBuf,
         config: ProjectConfig,
+        window: Widget,
         notebook: Widget,
         tree_store: TreeStore,
         explorer: Widget,
@@ -69,16 +76,20 @@ mod linux {
         pending_definition: Option<String>,
         pending_lsp_position: Option<(PathBuf, usize, usize)>,
         tabs: Vec<Tab>,
+        close_data: Vec<Box<CloseTabData>>,
+        welcome_page: Widget,
         _terminal: Option<crate::vte::Terminal>,
     }
 
     const GTK_WINDOW_TOPLEVEL: c_int = 0;
+    const GTK_FILE_CHOOSER_ACTION_OPEN: c_int = 0;
     const GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER: c_int = 2;
     const GTK_RESPONSE_ACCEPT: c_int = -3;
     const GTK_RESPONSE_CANCEL: c_int = -6;
     const GTK_ORIENTATION_HORIZONTAL: c_int = 0;
     const GTK_ORIENTATION_VERTICAL: c_int = 1;
     const GTK_POLICY_AUTOMATIC: c_int = 1;
+    const GTK_RELIEF_NONE: c_int = 2;
     const G_TYPE_STRING: usize = 16 << 2;
     const GDK_CONTROL_MASK: u32 = 1 << 2;
     const GDK_SHIFT_MASK: u32 = 1 << 0;
@@ -188,6 +199,17 @@ mod linux {
         fn gtk_tree_store_append(store: TreeStore, iter: *mut TreeIter, parent: *const TreeIter);
         fn gtk_tree_store_set(store: TreeStore, iter: *mut TreeIter, ...);
         fn gtk_tree_store_remove(store: TreeStore, iter: *mut TreeIter) -> c_int;
+        fn gtk_tree_store_clear(store: TreeStore);
+        fn gtk_notebook_remove_page(notebook: Widget, page_num: c_int);
+        fn gtk_button_new_with_label(label: *const c_char) -> Widget;
+        fn gtk_button_set_relief(button: Widget, relief: c_int);
+        fn gtk_check_button_new_with_label(label: *const c_char) -> Widget;
+        fn gtk_toggle_button_set_active(button: Widget, is_active: c_int);
+        fn gtk_toggle_button_get_active(button: Widget) -> c_int;
+        fn gtk_combo_box_text_new() -> Widget;
+        fn gtk_combo_box_text_append_text(combo_box: Widget, text: *const c_char);
+        fn gtk_combo_box_text_get_active_text(combo_box: Widget) -> *mut c_char;
+        fn gtk_combo_box_set_active(combo_box: Widget, index: c_int);
         fn gtk_tree_view_new_with_model(model: TreeModel) -> Widget;
         fn gtk_tree_view_get_selection(tree: Widget) -> Widget;
         fn gtk_tree_view_set_headers_visible(tree: Widget, visible: c_int);
@@ -308,6 +330,7 @@ mod linux {
             let mut state = Box::new(AppState {
                 root: workspace.root.clone(),
                 config: workspace.config.clone(),
+                window: ptr::null_mut(),
                 notebook,
                 tree_store: ptr::null_mut(),
                 explorer: ptr::null_mut(),
@@ -319,6 +342,8 @@ mod linux {
                 pending_definition: None,
                 pending_lsp_position: None,
                 tabs: Vec::new(),
+                close_data: Vec::new(),
+                welcome_page: ptr::null_mut(),
                 _terminal: terminal,
             });
             let state_ptr = (&mut *state) as *mut AppState;
@@ -336,6 +361,9 @@ mod linux {
             );
             let explorer = build_explorer(state_ptr)?;
             state.explorer = explorer;
+            state.window = window;
+            state.restore_welcome_page();
+
             let menu = build_menu(state_ptr);
             let content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
             gtk_paned_pack1(horizontal, explorer, 0, 0);
@@ -367,7 +395,11 @@ mod linux {
                 }
                 return Ok(());
             }
-            let contents = fs::read_to_string(&path)?;
+            let bytes = fs::read(&path)?;
+            let (contents, is_binary) = match String::from_utf8(bytes) {
+                Ok(text) => (text, false),
+                Err(_) => ("Not valid UTF-8 — cannot display this file.".to_string(), true),
+            };
             let editor = scintilla::Editor::new()?;
             editor.set_line_number_margin(48);
             editor.set_font(
@@ -380,11 +412,14 @@ mod linux {
                 self.settings.editor.insert_spaces,
             );
             editor.set_text(&contents)?;
-            editor.apply_geany_abc_dark_theme();
-            if is_c_file(&path) {
-                editor.configure_c_lexer()?;
-            } else if let Some(lexer) = lexer_for_path(&path) {
-                editor.configure_basic_lexer(lexer)?;
+            let palette = crate::theme::load(&self.settings.editor.theme);
+            editor.apply_palette(&palette);
+            if !is_binary {
+                if is_c_file(&path) {
+                    editor.configure_c_lexer(&palette)?;
+                } else if let Some(lexer) = lexer_for_path(&path) {
+                    editor.configure_basic_lexer(lexer, &palette)?;
+                }
             }
             // SAFETY: the editor widget and AppState remain alive for the GTK loop.
             unsafe {
@@ -413,14 +448,36 @@ mod linux {
                 .unwrap_or_else(|| "Untitled".into());
             // SAFETY: editor is a GTK widget and notebook retains it after append.
             unsafe {
+                let was_empty = self.tabs.is_empty();
                 let page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
                 gtk_box_pack_start(page, editor.widget(), 1, 1, 0);
-                let page_number = gtk_notebook_append_page(self.notebook, page, label(&tab_name));
+                let tab_label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+                gtk_box_pack_start(tab_label_box, label(&tab_name), 0, 0, 0);
+                let close_text = CString::new("\u{00d7}").unwrap();
+                let close_btn = gtk_button_new_with_label(close_text.as_ptr());
+                gtk_button_set_relief(close_btn, GTK_RELIEF_NONE);
+                gtk_box_pack_start(tab_label_box, close_btn, 0, 0, 0);
+                gtk_widget_show_all(tab_label_box);
+                let close_data_box = Box::new(CloseTabData {
+                    state: self as *mut AppState,
+                    page,
+                });
+                let close_data_ptr = close_data_box.as_ref() as *const CloseTabData as *mut c_void;
+                self.close_data.push(close_data_box);
+                connect(close_btn, "clicked", on_close_tab as *const c_void, close_data_ptr);
+                let page_number = gtk_notebook_append_page(self.notebook, page, tab_label_box);
                 gtk_widget_show(editor.widget());
                 gtk_widget_show(page);
                 gtk_notebook_set_current_page(self.notebook, page_number);
                 gtk_widget_grab_focus(editor.widget());
-                self.tabs.push(Tab { path, page, editor });
+                self.tabs.push(Tab { path, page, editor, is_binary });
+                if was_empty && !self.welcome_page.is_null() {
+                    let welcome_num = gtk_notebook_page_num(self.notebook, self.welcome_page);
+                    if welcome_num >= 0 {
+                        gtk_notebook_remove_page(self.notebook, welcome_num);
+                    }
+                    self.welcome_page = ptr::null_mut();
+                }
             }
             Ok(())
         }
@@ -429,6 +486,9 @@ mod linux {
             let Some(tab) = (unsafe { self.active_tab() }) else {
                 return Ok(());
             };
+            if tab.is_binary {
+                return Ok(());
+            }
             let path = tab.path.clone();
             let bytes = tab.editor.text_bytes();
             fs::write(&path, &bytes)?;
@@ -814,11 +874,19 @@ mod linux {
                     "Tab width:",
                     &self.settings.editor.tab_width.to_string(),
                 )?;
-                let insert_spaces = command_row(
+                let insert_spaces = check_row(
                     content,
-                    "Insert spaces (true/false):",
-                    &self.settings.editor.insert_spaces.to_string(),
-                )?;
+                    "Use spaces for indentation (instead of tabs)",
+                    self.settings.editor.insert_spaces,
+                );
+                let theme_names = crate::theme::list();
+                let theme_refs: Vec<&str> = theme_names.iter().map(String::as_str).collect();
+                let theme = combo_row(content, "Theme:", &theme_refs, &self.settings.editor.theme);
+                let close_tabs_on_open = check_row(
+                    content,
+                    "Close open files when switching folders",
+                    self.settings.workspace.close_tabs_on_folder_open,
+                );
                 let shell = command_row(
                     content,
                     "Shell (next launch):",
@@ -836,7 +904,12 @@ mod linux {
                     self.settings.editor.font_size = parse_entry(font_size, "font size")?;
                     self.settings.editor.tab_width = parse_entry(tab_width, "tab width")?;
                     self.settings.editor.insert_spaces =
-                        parse_entry(insert_spaces, "insert spaces")?;
+                        gtk_toggle_button_get_active(insert_spaces) != 0;
+                    if let Some(t) = combo_active_text(theme) {
+                        self.settings.editor.theme = t;
+                    }
+                    self.settings.workspace.close_tabs_on_folder_open =
+                        gtk_toggle_button_get_active(close_tabs_on_open) != 0;
                     self.settings.terminal.shell = entry_text(shell);
                     self.settings.lsp.clangd = entry_text(clangd);
                     self.settings.lsp.rust_analyzer = entry_text(rust_analyzer);
@@ -856,6 +929,7 @@ mod linux {
         }
 
         fn apply_editor_settings(&self) -> io::Result<()> {
+            let palette = crate::theme::load(&self.settings.editor.theme);
             for tab in &self.tabs {
                 tab.editor.set_font(
                     32,
@@ -866,14 +940,155 @@ mod linux {
                     self.settings.editor.tab_width,
                     self.settings.editor.insert_spaces,
                 );
-                tab.editor.apply_geany_abc_dark_theme();
+                tab.editor.apply_palette(&palette);
                 if is_c_file(&tab.path) {
                     tab.editor.refresh_c_function_highlighting()?;
                 } else if let Some(lexer) = lexer_for_path(&tab.path) {
-                    tab.editor.configure_basic_lexer(lexer)?;
+                    tab.editor.configure_basic_lexer(lexer, &palette)?;
                 }
             }
             Ok(())
+        }
+
+        unsafe fn open_file_dialog(&mut self) -> io::Result<()> {
+            // SAFETY: the dialog is created, run, and released on this main thread.
+            unsafe {
+                let title = CString::new("Open File").unwrap();
+                let accept = CString::new("Open").unwrap();
+                let cancel = CString::new("Cancel").unwrap();
+                let dialog = gtk_file_chooser_native_new(
+                    title.as_ptr(),
+                    ptr::null_mut(),
+                    GTK_FILE_CHOOSER_ACTION_OPEN,
+                    accept.as_ptr(),
+                    cancel.as_ptr(),
+                );
+                let response = gtk_native_dialog_run(dialog);
+                let path = if response == GTK_RESPONSE_ACCEPT {
+                    let filename = gtk_file_chooser_get_filename(dialog);
+                    if filename.is_null() {
+                        None
+                    } else {
+                        let path = PathBuf::from(std::ffi::OsStr::from_bytes(
+                            CStr::from_ptr(filename).to_bytes(),
+                        ));
+                        g_free(filename.cast());
+                        Some(path)
+                    }
+                } else {
+                    None
+                };
+                g_object_unref(dialog);
+                if let Some(path) = path {
+                    self.open_file(&path)?;
+                }
+            }
+            Ok(())
+        }
+
+        unsafe fn open_folder_dialog(&mut self) -> io::Result<()> {
+            // SAFETY: the dialog is created, run, and released on this main thread.
+            unsafe {
+                let title = CString::new("Open Folder").unwrap();
+                let accept = CString::new("Open").unwrap();
+                let cancel = CString::new("Cancel").unwrap();
+                let dialog = gtk_file_chooser_native_new(
+                    title.as_ptr(),
+                    ptr::null_mut(),
+                    GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+                    accept.as_ptr(),
+                    cancel.as_ptr(),
+                );
+                let response = gtk_native_dialog_run(dialog);
+                let path = if response == GTK_RESPONSE_ACCEPT {
+                    let filename = gtk_file_chooser_get_filename(dialog);
+                    if filename.is_null() {
+                        None
+                    } else {
+                        let path = PathBuf::from(std::ffi::OsStr::from_bytes(
+                            CStr::from_ptr(filename).to_bytes(),
+                        ));
+                        g_free(filename.cast());
+                        Some(path)
+                    }
+                } else {
+                    None
+                };
+                g_object_unref(dialog);
+                if let Some(folder) = path {
+                    self.open_folder(folder)?;
+                }
+            }
+            Ok(())
+        }
+
+        unsafe fn open_folder(&mut self, path: PathBuf) -> io::Result<()> {
+            if self.settings.workspace.close_tabs_on_folder_open {
+                unsafe { self.close_all_tabs() };
+            }
+            let path = fs::canonicalize(path)?;
+            self.root = path;
+            self.config = crate::config::ProjectConfig::load(&self.root)?;
+            let title = CString::new(format!("Nokin - {}", self.root.display()))
+                .map_err(|_| io::Error::other("workspace path contains a NUL byte"))?;
+            // SAFETY: window remains live for the duration of gtk_main.
+            unsafe { gtk_window_set_title(self.window, title.as_ptr()) };
+            unsafe { gtk_tree_store_clear(self.tree_store) };
+            unsafe { append_directory_children(self.tree_store, ptr::null(), &self.root)? };
+            let workspace = crate::workspace::Workspace {
+                root: self.root.clone(),
+                initial_file: None,
+                config: self.config.clone(),
+            };
+            self.index = build_index(&workspace)?;
+            self.lsp = lsp::Manager::new(
+                &self.root,
+                lsp::ServerCommands {
+                    clangd: self.settings.lsp.clangd.clone(),
+                    rust_analyzer: self.settings.lsp.rust_analyzer.clone(),
+                },
+            );
+            if let Some(terminal) = &self._terminal {
+                let path_str = self.root.to_string_lossy();
+                let escaped = path_str.replace('\'', "'\\''");
+                let _ = terminal.feed_command(&format!("cd '{escaped}'"));
+            }
+            Ok(())
+        }
+
+        unsafe fn close_all_tabs(&mut self) {
+            // SAFETY: notebook and tab pages remain live during gtk_main.
+            for tab in &self.tabs {
+                unsafe {
+                    let page_num = gtk_notebook_page_num(self.notebook, tab.page);
+                    if page_num >= 0 {
+                        gtk_notebook_remove_page(self.notebook, page_num);
+                    }
+                }
+            }
+            self.tabs.clear();
+            self.close_data.clear();
+            unsafe { self.restore_welcome_page() };
+        }
+
+        unsafe fn restore_welcome_page(&mut self) {
+            if !self.welcome_page.is_null() {
+                return;
+            }
+            // SAFETY: notebook remains live during gtk_main.
+            unsafe {
+                let welcome_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+                gtk_box_pack_start(
+                    welcome_box,
+                    label("Open a file or folder to get started\n\nFile  \u{2192}  Open File...\nFile  \u{2192}  Open Folder..."),
+                    1,
+                    1,
+                    0,
+                );
+                gtk_notebook_append_page(self.notebook, welcome_box, ptr::null_mut());
+                gtk_widget_show_all(welcome_box);
+                self.welcome_page = welcome_box;
+            }
         }
 
         unsafe fn active_extension(&self) -> Option<&str> {
@@ -898,6 +1113,19 @@ mod linux {
         unsafe {
             let bar = gtk_menu_bar_new();
             let file = submenu(bar, "_File");
+            menu_action(
+                file,
+                "Open _File...",
+                on_open_file_activate as *const c_void,
+                state.cast(),
+            );
+            menu_action(
+                file,
+                "Open Fol_der...",
+                on_open_folder_activate as *const c_void,
+                state.cast(),
+            );
+            gtk_menu_shell_append(file, gtk_separator_menu_item_new());
             menu_action(
                 file,
                 "_Save",
@@ -1076,6 +1304,46 @@ mod linux {
         Ok(entry)
     }
 
+    unsafe fn combo_row(container: Widget, title: &str, options: &[&str], current: &str) -> Widget {
+        unsafe {
+            let row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+            gtk_box_pack_start(container, row, 0, 1, 4);
+            gtk_box_pack_start(row, label(title), 0, 0, 4);
+            let combo = gtk_combo_box_text_new();
+            for (i, option) in options.iter().enumerate() {
+                let text = CString::new(*option).unwrap();
+                gtk_combo_box_text_append_text(combo, text.as_ptr());
+                if *option == current {
+                    gtk_combo_box_set_active(combo, i as c_int);
+                }
+            }
+            gtk_box_pack_start(row, combo, 1, 1, 4);
+            combo
+        }
+    }
+
+    unsafe fn combo_active_text(combo: Widget) -> Option<String> {
+        unsafe {
+            let text = gtk_combo_box_text_get_active_text(combo);
+            if text.is_null() {
+                return None;
+            }
+            let result = CStr::from_ptr(text).to_string_lossy().into_owned();
+            g_free(text.cast());
+            Some(result)
+        }
+    }
+
+    unsafe fn check_row(container: Widget, title: &str, active: bool) -> Widget {
+        let text = CString::new(title).unwrap();
+        unsafe {
+            let check = gtk_check_button_new_with_label(text.as_ptr());
+            gtk_toggle_button_set_active(check, active as c_int);
+            gtk_box_pack_start(container, check, 0, 1, 4);
+            check
+        }
+    }
+
     unsafe fn add_dialog_button(dialog: Widget, title: &str, response: c_int) {
         let title = CString::new(title).unwrap();
         unsafe { gtk_dialog_add_button(dialog, title.as_ptr(), response) };
@@ -1183,9 +1451,6 @@ mod linux {
         for entry in entries {
             let path = entry.path();
             let name = entry.file_name();
-            if name.as_bytes().starts_with(b".") {
-                continue;
-            }
             let mut iter = empty_iter();
             // SAFETY: store and parent belong to the live tree model.
             unsafe {
@@ -1373,6 +1638,41 @@ mod linux {
             return 1;
         }
         0
+    }
+
+    unsafe extern "C" fn on_open_file_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).open_file_dialog() } {
+            eprintln!("nokin: {error}");
+        }
+    }
+
+    unsafe extern "C" fn on_open_folder_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).open_folder_dialog() } {
+            eprintln!("nokin: {error}");
+        }
+    }
+
+    unsafe extern "C" fn on_close_tab(_button: Widget, data: *mut c_void) {
+        // SAFETY: close_data remains in AppState.close_data for the tab's lifetime.
+        unsafe {
+            let (page, state) = {
+                let d = &*data.cast::<CloseTabData>();
+                (d.page, &mut *d.state)
+            };
+            let page_num = gtk_notebook_page_num(state.notebook, page);
+            if page_num >= 0 {
+                gtk_notebook_remove_page(state.notebook, page_num);
+            }
+            state.tabs.retain(|tab| tab.page != page);
+            state
+                .close_data
+                .retain(|d| d.as_ref() as *const CloseTabData as *mut c_void != data);
+            if state.tabs.is_empty() {
+                state.restore_welcome_page();
+            }
+        }
     }
 
     unsafe extern "C" fn on_save_activate(_item: Widget, data: *mut c_void) {
@@ -1621,7 +1921,7 @@ mod linux {
 
     fn build_index(workspace: &Workspace) -> io::Result<Index> {
         let mut index = Index::default();
-        for file in workspace.c_files()? {
+        for file in workspace.c_files()?.into_iter().chain(workspace.rs_files()?) {
             if let Ok(source) = fs::read_to_string(&file) {
                 index.update(&file, &source);
             }

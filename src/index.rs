@@ -9,6 +9,7 @@ pub enum SymbolKind {
     Struct,
     Union,
     Enum,
+    Trait,
     Typedef,
     Global,
     Macro,
@@ -54,6 +55,13 @@ impl Index {
 }
 
 pub fn extract_symbols(file: &Path, source: &str) -> Vec<Symbol> {
+    match file.extension().and_then(|e| e.to_str()) {
+        Some("rs") => extract_rust_symbols(file, source),
+        _ => extract_c_symbols(file, source),
+    }
+}
+
+fn extract_c_symbols(file: &Path, source: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     let mut parser = Parser::new();
     if parser
@@ -71,6 +79,42 @@ pub fn extract_symbols(file: &Path, source: &str) -> Vec<Symbol> {
         extract_top_level_node(&mut symbols, file, source, node);
     }
     symbols
+}
+
+fn extract_rust_symbols(file: &Path, source: &str) -> Vec<Symbol> {
+    let mut symbols = Vec::new();
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return symbols;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return symbols;
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        extract_rust_node(&mut symbols, file, source, node);
+    }
+    symbols
+}
+
+fn extract_rust_node(symbols: &mut Vec<Symbol>, file: &Path, source: &str, node: Node<'_>) {
+    let kind = match node.kind() {
+        "function_item" => SymbolKind::Function,
+        "struct_item" => SymbolKind::Struct,
+        "enum_item" => SymbolKind::Enum,
+        "trait_item" => SymbolKind::Trait,
+        "type_alias" => SymbolKind::Typedef,
+        "const_item" | "static_item" => SymbolKind::Global,
+        "macro_definition" => SymbolKind::Macro,
+        _ => return,
+    };
+    if let Some(name) = node.child_by_field_name("name") {
+        push_node(symbols, file, source, name, kind);
+    }
 }
 
 fn extract_top_level_node(symbols: &mut Vec<Symbol>, file: &Path, source: &str, node: Node<'_>) {

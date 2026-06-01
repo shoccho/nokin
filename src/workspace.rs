@@ -39,6 +39,10 @@ impl Workspace {
         walk_c_files(&self.root)
     }
 
+    pub fn rs_files(&self) -> io::Result<Vec<PathBuf>> {
+        walk_files(&self.root, "rs")
+    }
+
     pub fn include_roots(&self) -> Vec<PathBuf> {
         self.config
             .include_dirs
@@ -68,6 +72,28 @@ pub fn walk_c_files(root: &Path) -> io::Result<Vec<PathBuf>> {
                     pending.push(path);
                 }
             } else if is_c_file(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+pub fn walk_files(root: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if entry.file_type()?.is_dir() {
+                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref()) {
+                    pending.push(path);
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some(extension) {
                 files.push(path);
             }
         }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub editor: EditorSettings,
+    pub workspace: WorkspaceSettings,
     pub terminal: TerminalSettings,
     pub lsp: LspSettings,
 }
@@ -16,6 +17,12 @@ pub struct EditorSettings {
     pub font_size: f64,
     pub tab_width: usize,
     pub insert_spaces: bool,
+    pub theme: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceSettings {
+    pub close_tabs_on_folder_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +44,14 @@ pub struct ProjectConfig {
     pub include_dirs: Vec<PathBuf>,
 }
 
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            close_tabs_on_folder_open: true,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -45,7 +60,9 @@ impl Default for Settings {
                 font_size: 11.0,
                 tab_width: 4,
                 insert_spaces: true,
+                theme: "tango-dark".into(),
             },
+            workspace: WorkspaceSettings::default(),
             terminal: TerminalSettings {
                 shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
             },
@@ -82,6 +99,12 @@ impl Settings {
                 settings.editor.insert_spaces =
                     value.parse().unwrap_or(settings.editor.insert_spaces)
             }
+            ("editor", "theme") => settings.editor.theme = unquote(value),
+            ("workspace", "close_tabs_on_folder_open") => {
+                settings.workspace.close_tabs_on_folder_open = value
+                    .parse()
+                    .unwrap_or(settings.workspace.close_tabs_on_folder_open)
+            }
             ("terminal", "shell") => settings.terminal.shell = unquote(value),
             ("lsp", "clangd") => settings.lsp.clangd = unquote(value),
             ("lsp", "rust_analyzer") => settings.lsp.rust_analyzer = unquote(value),
@@ -101,11 +124,13 @@ impl Settings {
 
     fn to_toml(&self) -> String {
         format!(
-            "[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
+            "[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\ntheme = \"{}\"\n\n[workspace]\nclose_tabs_on_folder_open = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
             escape_toml(&self.editor.font_family),
             self.editor.font_size,
             self.editor.tab_width,
             self.editor.insert_spaces,
+            escape_toml(&self.editor.theme),
+            self.workspace.close_tabs_on_folder_open,
             escape_toml(&self.terminal.shell),
             escape_toml(&self.lsp.clangd),
             escape_toml(&self.lsp.rust_analyzer),
@@ -252,12 +277,13 @@ mod tests {
     #[test]
     fn parses_documented_settings() {
         let settings = Settings::parse(
-            "[editor]\nfont_family = \"Iosevka\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\n[terminal]\nshell = \"/bin/bash\"\n",
+            "[editor]\nfont_family = \"Iosevka\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\ntheme = \"tango-dark\"\n[terminal]\nshell = \"/bin/bash\"\n",
         );
         assert_eq!(settings.editor.font_family, "Iosevka");
         assert_eq!(settings.editor.font_size, 12.5);
         assert_eq!(settings.editor.tab_width, 2);
         assert!(!settings.editor.insert_spaces);
+        assert_eq!(settings.editor.theme, "tango-dark");
         assert_eq!(settings.terminal.shell, "/bin/bash");
         assert_eq!(settings.lsp.clangd, "clangd");
         assert_eq!(settings.lsp.rust_analyzer, "rust-analyzer");
@@ -266,8 +292,9 @@ mod tests {
     #[test]
     fn serializes_settings_for_round_trip() {
         let settings = Settings::parse(
-            "[editor]\nfont_family = \"JetBrains Mono\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\n[terminal]\nshell = \"/bin/zsh\"\n",
+            "[editor]\nfont_family = \"JetBrains Mono\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\ntheme = \"tango-dark\"\n[workspace]\nclose_tabs_on_folder_open = false\n[terminal]\nshell = \"/bin/zsh\"\n",
         );
+        assert_eq!(settings.workspace.close_tabs_on_folder_open, false);
         assert_eq!(Settings::parse(&settings.to_toml()), settings);
     }
 

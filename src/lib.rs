@@ -4,6 +4,7 @@ pub mod edit;
 pub mod index;
 pub mod lsp;
 pub mod run;
+pub mod theme;
 pub mod ui;
 pub mod vte;
 pub mod workspace;

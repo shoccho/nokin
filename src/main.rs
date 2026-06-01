@@ -1,22 +1,11 @@
 use std::env;
+use std::path::PathBuf;
 
 use nokin::workspace::Workspace;
 
 fn main() {
-    let path = match env::args_os().nth(1) {
-        Some(path) => Some(path.into()),
-        None => match nokin::ui::choose_workspace() {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("nokin: {error}");
-                std::process::exit(1);
-            }
-        },
-    };
-    let Some(path) = path else {
-        return;
-    };
-    let workspace = match Workspace::from_optional_path(Some(path)) {
+    let path = env::args_os().nth(1).map(PathBuf::from);
+    let workspace = match Workspace::from_optional_path(path) {
         Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("nokin: {error}");

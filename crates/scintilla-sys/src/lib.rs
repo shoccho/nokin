@@ -77,6 +77,11 @@ pub const SCI_SETILEXER: u32 = 4033;
 pub const SCI_ALLOCATESUBSTYLES: u32 = 4020;
 pub const SCI_GETSUBSTYLESSTART: u32 = 4021;
 pub const SCI_SETIDENTIFIERS: u32 = 4024;
+pub const SCI_SETCARETWIDTH: u32 = 2188;
+pub const SCI_SETCARETLINEVISIBLE: u32 = 2096;
+pub const SCI_SETCARETLINEBACK: u32 = 2098;
+pub const SCI_SETEXTRAASCENT: u32 = 2525;
+pub const SCI_SETEXTRADESCENT: u32 = 2527;
 
 unsafe extern "C" {
     pub fn scintilla_new() -> Widget;

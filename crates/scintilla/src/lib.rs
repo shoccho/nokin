@@ -1,11 +1,64 @@
+use std::cell::Cell;
 use std::ffi::{CString, c_void};
 use std::io;
 use std::ptr::NonNull;
 
 use scintilla_sys as sys;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub default_fg: usize,
+    pub default_bg: usize,
+    pub comment: usize,
+    pub number: usize,
+    pub keyword: usize,
+    pub keyword_bold: bool,
+    pub string: usize,
+    pub string_eol_bg: usize,
+    pub preprocessor: usize,
+    pub type_color: usize,
+    pub function: usize,
+    pub selection_fg: usize,
+    pub selection_bg: usize,
+    pub margin_fg: usize,
+    pub caret: usize,
+    pub caret_width: usize,
+    pub current_line_bg: usize,
+    pub current_line_visible: bool,
+    pub extra_ascent: i32,
+    pub extra_descent: i32,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            default_fg: 0xdbdbdb,
+            default_bg: 0x1c1c1c,
+            comment: 0xadadad,
+            number: 0x8ad1ff,
+            keyword: 0xbf6069,
+            keyword_bold: true,
+            string: 0x6bb37c,
+            string_eol_bg: 0x6e006e,
+            preprocessor: 0x45bde6,
+            type_color: 0x50aab3,
+            function: 0xcc8ad4,
+            selection_fg: 0x000000,
+            selection_bg: 0xe7a96b,
+            margin_fg: 0x6e6e6e,
+            caret: 0xffffff,
+            caret_width: 1,
+            current_line_bg: 0x262626,
+            current_line_visible: true,
+            extra_ascent: 0,
+            extra_descent: 0,
+        }
+    }
+}
+
 pub struct Editor {
     widget: NonNull<c_void>,
+    function_color: Cell<usize>,
 }
 
 impl Editor {
@@ -15,7 +68,10 @@ impl Editor {
         // owned by GTK after it is inserted into a container.
         let widget = unsafe { sys::scintilla_new() };
         NonNull::new(widget)
-            .map(|widget| Self { widget })
+            .map(|widget| Self {
+                widget,
+                function_color: Cell::new(Palette::default().function),
+            })
             .ok_or_else(|| io::Error::other("Scintilla widget creation failed"))
     }
 
@@ -23,7 +79,7 @@ impl Editor {
         self.widget.as_ptr()
     }
 
-    pub fn configure_c_lexer(&self) -> io::Result<()> {
+    pub fn configure_c_lexer(&self, palette: &Palette) -> io::Result<()> {
         self.set_lexer("cpp")?;
         self.set_property("styling.within.preprocessor", "1")?;
         self.set_property("lexer.cpp.track.preprocessor", "0")?;
@@ -41,24 +97,24 @@ impl Editor {
         )?;
         let function_style = self.send(sys::SCI_ALLOCATESUBSTYLES, 11, 1);
         if function_style >= 0 {
-            self.set_style(function_style as usize, 0xcc8ad4, None, false, false);
+            self.set_style(function_style as usize, palette.function, None, false, false);
         }
-        self.configure_folding();
+        self.configure_folding(palette);
         self.refresh_c_function_highlighting()?;
         self.send(sys::SCI_COLOURISE, 0, -1);
         Ok(())
     }
 
-    pub fn configure_basic_lexer(&self, lexer_name: &str) -> io::Result<()> {
+    pub fn configure_basic_lexer(&self, lexer_name: &str, palette: &Palette) -> io::Result<()> {
         self.set_lexer(lexer_name)?;
         self.set_property("fold", "1")?;
         self.set_property("fold.compact", "0")?;
         if lexer_name == "rust" {
-            self.configure_rust_lexer()?;
+            self.configure_rust_lexer(palette)?;
         } else {
-            self.apply_basic_lexer_theme();
+            self.apply_basic_lexer_styles(palette);
         }
-        self.configure_folding();
+        self.configure_folding(palette);
         self.send(sys::SCI_COLOURISE, 0, -1);
         Ok(())
     }
@@ -68,7 +124,13 @@ impl Editor {
         if function_style < 0 {
             return Ok(());
         }
-        self.set_style(function_style as usize, 0xcc8ad4, None, false, false);
+        self.set_style(
+            function_style as usize,
+            self.function_color.get(),
+            None,
+            false,
+            false,
+        );
         let identifiers = c_function_identifiers(&self.text_bytes()).join(" ");
         let identifiers = CString::new(identifiers)
             .map_err(|_| io::Error::other("function identifier contains a NUL byte"))?;
@@ -80,34 +142,40 @@ impl Editor {
         Ok(())
     }
 
-    pub fn apply_geany_abc_dark_theme(&self) {
-        const DEFAULT: usize = 32;
-        self.set_style(DEFAULT, 0xdbdbdb, Some(0x1c1c1c), false, false);
-        self.send(sys::SCI_STYLECLEARALL, 0, 0);
-        self.send(sys::SCI_SETCARETFORE, bgr(0xffffff) as usize, 0);
-        self.send(sys::SCI_SETSELFORE, 1, bgr(0x000000));
-        self.send(sys::SCI_SETSELBACK, 1, bgr(0xe7a96b));
-        self.set_style(33, 0x6e6e6e, Some(0x1c1c1c), false, false);
-        self.set_style(37, 0x595959, None, false, false);
-        self.send(sys::SCI_SETMARGINBACKN, 0, bgr(0x1c1c1c));
-        self.send(sys::SCI_SETMARGINBACKN, 1, bgr(0x1c1c1c));
-        self.send(sys::SCI_SETMARGINBACKN, 2, bgr(0x1c1c1c));
+    pub fn apply_palette(&self, palette: &Palette) {
+        self.function_color.set(palette.function);
 
+        const DEFAULT: usize = 32;
+        self.set_style(DEFAULT, palette.default_fg, Some(palette.default_bg), false, false);
+        self.send(sys::SCI_STYLECLEARALL, 0, 0);
+        self.send(sys::SCI_SETCARETFORE, bgr(palette.caret) as usize, 0);
+        self.send(sys::SCI_SETCARETWIDTH, palette.caret_width, 0);
+        self.send(sys::SCI_SETCARETLINEBACK, bgr(palette.current_line_bg) as usize, 0);
+        self.send(sys::SCI_SETCARETLINEVISIBLE, usize::from(palette.current_line_visible), 0);
+        self.send(sys::SCI_SETEXTRAASCENT, palette.extra_ascent as usize, 0);
+        self.send(sys::SCI_SETEXTRADESCENT, palette.extra_descent as usize, 0);
+        self.send(sys::SCI_SETSELFORE, 1, bgr(palette.selection_fg));
+        self.send(sys::SCI_SETSELBACK, 1, bgr(palette.selection_bg));
+        self.set_style(33, palette.margin_fg, Some(palette.default_bg), false, false);
+        self.send(sys::SCI_SETMARGINBACKN, 0, bgr(palette.default_bg));
+        self.send(sys::SCI_SETMARGINBACKN, 1, bgr(palette.default_bg));
+        self.send(sys::SCI_SETMARGINBACKN, 2, bgr(palette.default_bg));
+
+        // C/generic language style mapping (overridden by basic/rust lexer styles for non-C files)
         for style in [1, 2, 3, 15, 23, 24, 26] {
-            self.set_style(style, 0xadadad, None, false, false);
+            self.set_style(style, palette.comment, None, false, false);
         }
-        self.set_style(4, 0x8ad1ff, None, false, false);
-        self.set_style(5, 0xbf6069, None, true, false);
+        self.set_style(4, palette.number, None, false, false);
+        self.set_style(5, palette.keyword, None, palette.keyword_bold, false);
         for style in [6, 7, 13, 20, 21, 22, 27] {
-            self.set_style(style, 0x6bb37c, None, false, false);
+            self.set_style(style, palette.string, None, false, false);
         }
-        self.set_style(9, 0x45bde6, None, false, false);
-        self.set_style(10, 0xdbdbdb, None, false, false);
-        self.set_style(12, 0x6bb37c, Some(0x6e006e), false, false);
-        self.set_style(16, 0xbf6069, None, true, false);
-        self.set_style(17, 0xadadad, None, true, false);
-        self.set_style(18, 0xadadad, None, false, true);
-        self.set_style(19, 0x50aab3, None, true, false);
+        self.set_style(9, palette.preprocessor, None, false, false);
+        self.set_style(12, palette.string, Some(palette.string_eol_bg), false, false);
+        self.set_style(16, palette.keyword, None, palette.keyword_bold, false);
+        self.set_style(17, palette.comment, None, true, false);
+        self.set_style(18, palette.comment, None, false, true);
+        self.set_style(19, palette.type_color, None, true, false);
     }
 
     pub fn set_line_number_margin(&self, pixels: usize) {
@@ -394,7 +462,7 @@ impl Editor {
         Ok(())
     }
 
-    fn configure_rust_lexer(&self) -> io::Result<()> {
+    fn configure_rust_lexer(&self, palette: &Palette) -> io::Result<()> {
         self.set_keywords(
             0,
             "abstract alignof as async await become box break const continue crate do dyn else \
@@ -407,7 +475,7 @@ impl Editor {
             "bool char f32 f64 i128 i16 i32 i64 i8 isize str u128 u16 u32 u64 u8 usize",
         )?;
         self.set_keywords(2, "Self")?;
-        self.apply_rust_lexer_theme();
+        self.apply_rust_lexer_styles(palette);
         Ok(())
     }
 
@@ -460,7 +528,41 @@ impl Editor {
         (character > 0).then_some(character as u8)
     }
 
-    fn configure_folding(&self) {
+    fn apply_basic_lexer_styles(&self, palette: &Palette) {
+        for style in [1, 2, 3, 12, 15, 23, 24] {
+            self.set_style(style, palette.comment, None, false, false);
+        }
+        for style in [4, 8, 13] {
+            self.set_style(style, palette.number, None, false, false);
+        }
+        for style in [5, 10, 16] {
+            self.set_style(style, palette.keyword, None, palette.keyword_bold, false);
+        }
+        for style in [6, 7, 11, 14, 20, 21, 22] {
+            self.set_style(style, palette.string, None, false, false);
+        }
+        self.set_style(9, palette.preprocessor, None, false, false);
+        self.set_style(17, palette.function, None, false, false);
+        self.set_style(18, palette.type_color, None, true, false);
+    }
+
+    fn apply_rust_lexer_styles(&self, palette: &Palette) {
+        for style in [1, 2, 3, 4] {
+            self.set_style(style, palette.comment, None, false, false);
+        }
+        self.set_style(5, palette.number, None, false, false);
+        for style in [6, 7, 8, 9, 10, 11, 12] {
+            self.set_style(style, palette.keyword, None, palette.keyword_bold, false);
+        }
+        for style in [13, 14, 15, 21, 22, 23] {
+            self.set_style(style, palette.string, None, false, false);
+        }
+        self.set_style(18, palette.preprocessor, None, false, false);
+        self.set_style(19, palette.preprocessor, None, false, false);
+        self.set_style(20, palette.string, Some(palette.string_eol_bg), false, false);
+    }
+
+    fn configure_folding(&self, palette: &Palette) {
         const SC_MARGIN_SYMBOL: usize = 0;
         const SC_MASK_FOLDERS: usize = 0xfe00_0000;
         const SC_AUTOMATICFOLD_SHOW_CLICK_CHANGE: usize = 0x0001 | 0x0002 | 0x0004;
@@ -478,8 +580,8 @@ impl Editor {
         self.send(sys::SCI_SETMARGINWIDTHN, 1, 0);
         self.send(sys::SCI_SETMARGINWIDTHN, 2, 14);
         self.send(sys::SCI_SETMARGINSENSITIVEN, 2, 1);
-        self.send(sys::SCI_SETFOLDMARGINCOLOUR, 1, bgr(0x1c1c1c));
-        self.send(sys::SCI_SETFOLDMARGINHICOLOUR, 1, bgr(0x1c1c1c));
+        self.send(sys::SCI_SETFOLDMARGINCOLOUR, 1, bgr(palette.default_bg));
+        self.send(sys::SCI_SETFOLDMARGINHICOLOUR, 1, bgr(palette.default_bg));
         self.send(sys::SCI_SETFOLDFLAGS, 16, 0);
         self.send(
             sys::SCI_SETAUTOMATICFOLD,
@@ -488,48 +590,9 @@ impl Editor {
         );
         for &(marker, symbol) in MARKERS {
             self.send(sys::SCI_MARKERDEFINE, marker, symbol);
-            self.send(sys::SCI_MARKERSETFORE, marker, bgr(0x1c1c1c));
-            self.send(sys::SCI_MARKERSETBACK, marker, bgr(0x5c5c5c));
+            self.send(sys::SCI_MARKERSETFORE, marker, bgr(palette.default_bg));
+            self.send(sys::SCI_MARKERSETBACK, marker, bgr(palette.margin_fg));
         }
-    }
-
-    fn apply_basic_lexer_theme(&self) {
-        for style in [1, 2, 3, 12, 15, 23, 24] {
-            self.set_style(style, 0xadadad, None, false, false);
-        }
-        for style in [4, 8, 13] {
-            self.set_style(style, 0x8ad1ff, None, false, false);
-        }
-        for style in [5, 10, 16] {
-            self.set_style(style, 0xbf6069, None, true, false);
-        }
-        for style in [6, 7, 11, 14, 20, 21, 22] {
-            self.set_style(style, 0x6bb37c, None, false, false);
-        }
-        self.set_style(9, 0x45bde6, None, false, false);
-        self.set_style(17, 0xcc8ad4, None, false, false);
-        self.set_style(18, 0x50aab3, None, false, false);
-    }
-
-    fn apply_rust_lexer_theme(&self) {
-        for style in [1, 2, 3, 4] {
-            self.set_style(style, 0xadadad, None, false, false);
-        }
-        self.set_style(5, 0x8ad1ff, None, false, false);
-        for style in [6, 7, 8, 9] {
-            self.set_style(style, 0xbf6069, None, true, false);
-        }
-        self.set_style(10, 0x50aab3, None, true, false);
-        self.set_style(11, 0xbf6069, None, true, false);
-        self.set_style(12, 0xbf6069, None, true, false);
-        for style in [13, 14, 15, 21, 22, 23, 24, 25] {
-            self.set_style(style, 0x6bb37c, None, false, false);
-        }
-        self.set_style(16, 0xdbdbdb, None, false, false);
-        self.set_style(17, 0xdbdbdb, None, false, false);
-        self.set_style(18, 0x23b0e6, None, false, false);
-        self.set_style(19, 0x45bde6, None, false, false);
-        self.set_style(20, 0xbf6069, Some(0x6e006e), false, false);
     }
 
     fn set_style(

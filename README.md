@@ -11,9 +11,10 @@ and intentionally excluded from Git.
 - Scintilla `5.6.2` editor widget with Lexilla `5.4.8` highlighting for common languages and
   formats, plain-text fallback, initial-file loading, line-number margin, and fractional font
   sizing.
-- Geany-derived `abc-dark` styling for every buffer, plus C token and local-function styling,
-  folding markers, lexer fold properties, indentation guides, tab indentation, backspace unindent,
-  and brace-aware newline indentation.
+- Theme system using Geany-compatible `.conf` color scheme files loaded from
+  `~/.config/nokin/themes/`; selectable per-user from the Settings dialog. C token and
+  local-function styling, folding markers, lexer fold properties, indentation guides, tab
+  indentation, backspace unindent, and brace-aware newline indentation follow the active theme.
 - Basic File, Edit, View, Build, and Navigate application menus.
 - Runtime-loaded GTK3 VTE `2.91` boundary with an `abc-dark` terminal palette, persistent
   workspace-rooted shell spawn, and command injection API. The UI shows a fallback when VTE is
@@ -27,7 +28,7 @@ and intentionally excluded from Git.
 - `Ctrl+D` selects the word at the caret and adds the next matching occurrence on repeated presses.
 - Build-menu command configuration for the workspace fallback and the active file extension,
   persisted to project-local `.nokin.toml`.
-- An Edit-menu settings dialog persists font, indentation, and shell settings.
+- An Edit-menu settings dialog persists font, indentation, shell, and theme settings.
 - Paired delimiters, closing-delimiter skipping, indentation helpers, and C identifier completion.
 - C workspace walking, transitive include resolution, and a Tree-sitter C symbol index.
 - Lazy LSP integration for Rust through `rust-analyzer` and C/C++ through `clangd`: definitions,
@@ -74,6 +75,10 @@ font_family = "Monospace"
 font_size = 11.0
 tab_width = 4
 insert_spaces = true
+theme = "tango-dark"
+
+[workspace]
+close_tabs_on_folder_open = true
 
 [terminal]
 shell = "/bin/bash"
@@ -100,13 +105,17 @@ include_dirs = ["include", "../shared/include"]
 Project run commands are trusted workspace configuration and execute in the integrated shell.
 Supported path placeholders are `${file}`, `${file_dir}`, and `${workspace}`.
 
-Tree-sitter fallback navigation is syntactic and may be imperfect around preprocessing,
-conditional compilation, generated headers, and compile flags. LSP shortcuts are `Ctrl+Space`
-for completion, `Ctrl+Shift+Space` for signature help, `Ctrl+K` for hover, `Ctrl+.` for code
-actions, `F2` for rename, and `Ctrl+Shift+I` for formatting. References, diagnostics refresh,
-and semantic-token refresh are available from the Navigate menu. Server commands are configurable
-in the Settings dialog. Code actions that require executing an LSP command without a workspace edit
-are reported but are not executed automatically.
+## Themes
+
+Nokin uses [Geany](https://www.geany.org/)'s color scheme format (`.conf` files). Place any
+Geany theme file in `~/.config/nokin/themes/` and it will appear in the Settings dialog.
+
+A large collection of ready-to-use themes is available from the
+[geany-themes](https://github.com/geany/geany-themes) repository. Download any `.conf` file
+from there and drop it into `~/.config/nokin/themes/`.
+
+The `colorschemes/` directory in this repository contains a couple of reference schemes for
+development and testing. Each file retains its original copyright and license header.
 
 ## Verification
 
@@ -114,3 +123,11 @@ are reported but are not executed automatically.
 cargo test
 cargo run -- .
 ```
+
+Tree-sitter fallback navigation is syntactic and may be imperfect around preprocessing,
+conditional compilation, generated headers, and compile flags. LSP shortcuts are `Ctrl+Space`
+for completion, `Ctrl+Shift+Space` for signature help, `Ctrl+K` for hover, `Ctrl+.` for code
+actions, `F2` for rename, and `Ctrl+Shift+I` for formatting. References, diagnostics refresh,
+and semantic-token refresh are available from the Navigate menu. Server commands are configurable
+in the Settings dialog. Code actions that require executing an LSP command without a workspace edit
+are reported but are not executed automatically.
