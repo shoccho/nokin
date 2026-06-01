@@ -28,13 +28,99 @@ pub fn list() -> Vec<String> {
 }
 
 pub fn load(name: &str) -> Palette {
+    load_scheme(name).editor
+}
+
+pub fn load_scheme(name: &str) -> Scheme {
     for dir in theme_dirs() {
         let path = dir.join(format!("{name}.conf"));
         if let Ok(src) = std::fs::read_to_string(&path) {
-            return Theme::parse(&src).to_palette();
+            return Theme::parse(&src).to_scheme();
         }
     }
-    Palette::default()
+    Scheme::from(Palette::default())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scheme {
+    pub editor: Palette,
+    pub ui: UiPalette,
+    pub terminal: TerminalPalette,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiPalette {
+    pub foreground: usize,
+    pub background: usize,
+    pub panel: usize,
+    pub raised: usize,
+    pub border: usize,
+    pub selection_foreground: usize,
+    pub selection_background: usize,
+    pub accent: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalPalette {
+    pub foreground: usize,
+    pub background: usize,
+    pub ansi: [usize; 16],
+}
+
+impl From<Palette> for Scheme {
+    fn from(editor: Palette) -> Self {
+        let ui = UiPalette::from(&editor);
+        let terminal = TerminalPalette::from(&editor);
+        Self {
+            editor,
+            ui,
+            terminal,
+        }
+    }
+}
+
+impl From<&Palette> for UiPalette {
+    fn from(palette: &Palette) -> Self {
+        Self {
+            foreground: palette.default_fg,
+            background: palette.default_bg,
+            panel: blend(palette.default_bg, palette.default_fg, 0.06),
+            raised: blend(palette.default_bg, palette.default_fg, 0.12),
+            border: blend(palette.default_bg, palette.default_fg, 0.22),
+            selection_foreground: palette.selection_fg,
+            selection_background: palette.selection_bg,
+            accent: palette.keyword,
+        }
+    }
+}
+
+impl From<&Palette> for TerminalPalette {
+    fn from(palette: &Palette) -> Self {
+        let background = palette.default_bg;
+        let foreground = palette.default_fg;
+        Self {
+            foreground,
+            background,
+            ansi: [
+                background,
+                palette.keyword,
+                palette.string,
+                palette.number,
+                palette.preprocessor,
+                palette.function,
+                palette.type_color,
+                foreground,
+                blend(background, foreground, 0.35),
+                blend(palette.keyword, foreground, 0.25),
+                blend(palette.string, foreground, 0.25),
+                blend(palette.number, foreground, 0.25),
+                blend(palette.preprocessor, foreground, 0.25),
+                blend(palette.function, foreground, 0.25),
+                blend(palette.type_color, foreground, 0.25),
+                blend(foreground, 0xffffff, 0.35),
+            ],
+        }
+    }
 }
 
 /// Directories searched for theme `.conf` files, in order of preference:
@@ -194,6 +280,10 @@ impl Theme {
         }
     }
 
+    pub fn to_scheme(&self) -> Scheme {
+        Scheme::from(self.to_palette())
+    }
+
     fn resolve(&self, name: &str) -> StyleValues {
         self.resolve_opt(name).unwrap_or_default()
     }
@@ -241,6 +331,15 @@ impl Theme {
             italic: raw.italic,
         })
     }
+}
+
+fn blend(from: usize, to: usize, amount: f64) -> usize {
+    let channel = |shift: usize| {
+        let from = ((from >> shift) & 0xff_usize) as f64;
+        let to = ((to >> shift) & 0xff_usize) as f64;
+        (from + (to - from) * amount).round() as usize
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -358,5 +457,15 @@ mod tests {
                 "theme {name}: fg==bg"
             );
         }
+    }
+
+    #[test]
+    fn derives_ui_and_terminal_colors_from_editor_scheme() {
+        let scheme = load_scheme("tango-dark");
+        assert_eq!(scheme.ui.foreground, scheme.editor.default_fg);
+        assert_eq!(scheme.ui.background, scheme.editor.default_bg);
+        assert_eq!(scheme.terminal.background, scheme.editor.default_bg);
+        assert_eq!(scheme.terminal.ansi[1], scheme.editor.keyword);
+        assert_ne!(scheme.ui.panel, scheme.ui.background);
     }
 }

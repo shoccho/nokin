@@ -5,10 +5,25 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
+    pub ui: UiSettings,
     pub editor: EditorSettings,
     pub workspace: WorkspaceSettings,
     pub terminal: TerminalSettings,
     pub lsp: LspSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UiThemeMode {
+    System,
+    ColorScheme,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiSettings {
+    pub theme_mode: UiThemeMode,
+    pub font_family: String,
+    pub font_size: f64,
+    pub scale: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +70,12 @@ impl Default for WorkspaceSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            ui: UiSettings {
+                theme_mode: UiThemeMode::System,
+                font_family: "Sans".into(),
+                font_size: 10.0,
+                scale: 1.0,
+            },
             editor: EditorSettings {
                 font_family: "Monospace".into(),
                 font_size: 11.0,
@@ -88,6 +109,15 @@ impl Settings {
     pub fn parse(input: &str) -> Self {
         let mut settings = Self::default();
         parse_entries(input, |section, key, value| match (section, key) {
+            ("ui", "theme_mode") => {
+                settings.ui.theme_mode =
+                    UiThemeMode::parse(&unquote(value)).unwrap_or(settings.ui.theme_mode)
+            }
+            ("ui", "font_family") => settings.ui.font_family = unquote(value),
+            ("ui", "font_size") => {
+                settings.ui.font_size = value.parse().unwrap_or(settings.ui.font_size)
+            }
+            ("ui", "scale") => settings.ui.scale = value.parse().unwrap_or(settings.ui.scale),
             ("editor", "font_family") => settings.editor.font_family = unquote(value),
             ("editor", "font_size") => {
                 settings.editor.font_size = value.parse().unwrap_or(settings.editor.font_size)
@@ -110,6 +140,8 @@ impl Settings {
             ("lsp", "rust_analyzer") => settings.lsp.rust_analyzer = unquote(value),
             _ => {}
         });
+        settings.ui.font_size = bounded_or(settings.ui.font_size, 6.0, 32.0, 10.0);
+        settings.ui.scale = bounded_or(settings.ui.scale, 0.75, 2.0, 1.0);
         settings
     }
 
@@ -124,7 +156,11 @@ impl Settings {
 
     fn to_toml(&self) -> String {
         format!(
-            "[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\ntheme = \"{}\"\n\n[workspace]\nclose_tabs_on_folder_open = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
+            "[ui]\ntheme_mode = \"{}\"\nfont_family = \"{}\"\nfont_size = {}\nscale = {}\n\n[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\ntheme = \"{}\"\n\n[workspace]\nclose_tabs_on_folder_open = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
+            self.ui.theme_mode.as_str(),
+            escape_toml(&self.ui.font_family),
+            self.ui.font_size,
+            self.ui.scale,
             escape_toml(&self.editor.font_family),
             self.editor.font_size,
             self.editor.tab_width,
@@ -135,6 +171,23 @@ impl Settings {
             escape_toml(&self.lsp.clangd),
             escape_toml(&self.lsp.rust_analyzer),
         )
+    }
+}
+
+impl UiThemeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "color-scheme" => Some(Self::ColorScheme),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::ColorScheme => "color-scheme",
+        }
     }
 }
 
@@ -270,6 +323,13 @@ fn parse_string_array(value: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+fn bounded_or(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    value
+        .is_finite()
+        .then(|| value.clamp(min, max))
+        .unwrap_or(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,10 +352,26 @@ mod tests {
     #[test]
     fn serializes_settings_for_round_trip() {
         let settings = Settings::parse(
-            "[editor]\nfont_family = \"JetBrains Mono\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\ntheme = \"tango-dark\"\n[workspace]\nclose_tabs_on_folder_open = false\n[terminal]\nshell = \"/bin/zsh\"\n",
+            "[ui]\ntheme_mode = \"color-scheme\"\nfont_family = \"Inter\"\nfont_size = 11\nscale = 1.25\n[editor]\nfont_family = \"JetBrains Mono\"\nfont_size = 12.5\ntab_width = 2\ninsert_spaces = false\ntheme = \"tango-dark\"\n[workspace]\nclose_tabs_on_folder_open = false\n[terminal]\nshell = \"/bin/zsh\"\n",
         );
+        assert_eq!(settings.ui.theme_mode, UiThemeMode::ColorScheme);
         assert_eq!(settings.workspace.close_tabs_on_folder_open, false);
         assert_eq!(Settings::parse(&settings.to_toml()), settings);
+    }
+
+    #[test]
+    fn defaults_and_bounds_new_ui_settings() {
+        let defaults = Settings::parse("[editor]\ntheme = \"tango-dark\"\n");
+        assert_eq!(defaults.ui.theme_mode, UiThemeMode::System);
+        assert_eq!(defaults.ui.scale, 1.0);
+
+        let bounded = Settings::parse("[ui]\nfont_size = 100\nscale = 0.1\n");
+        assert_eq!(bounded.ui.font_size, 32.0);
+        assert_eq!(bounded.ui.scale, 0.75);
+
+        let finite = Settings::parse("[ui]\nfont_size = NaN\nscale = inf\n");
+        assert_eq!(finite.ui.font_size, 10.0);
+        assert_eq!(finite.ui.scale, 1.0);
     }
 
     #[test]

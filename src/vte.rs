@@ -49,11 +49,18 @@ mod linux {
     pub struct Terminal {
         widget: Widget,
         feed_child: TerminalFeedChild,
+        set_foreground: TerminalSetColor,
+        set_background: TerminalSetColor,
+        set_colors: TerminalSetColors,
         _library: Library,
     }
 
     impl Terminal {
-        pub fn new(workspace: &Path, shell: &str) -> io::Result<Self> {
+        pub fn new(
+            workspace: &Path,
+            shell: &str,
+            colors: &crate::theme::TerminalPalette,
+        ) -> io::Result<Self> {
             // SAFETY: symbols are loaded from VTE's stable GTK3 ABI and retained for the
             // lifetime of the returned terminal.
             unsafe {
@@ -70,18 +77,6 @@ mod linux {
                 if widget.is_null() {
                     return Err(io::Error::other("VTE terminal creation failed"));
                 }
-                let foreground = rgba(0xdbdbdb);
-                let background = rgba(0x1c1c1c);
-                let palette = terminal_palette();
-                set_foreground(widget, &foreground);
-                set_background(widget, &background);
-                set_colors(
-                    widget,
-                    &foreground,
-                    &background,
-                    palette.as_ptr(),
-                    palette.len(),
-                );
                 let workspace = cstring_path(workspace)?;
                 let shell = CString::new(shell)
                     .map_err(|_| io::Error::other("terminal shell contains a NUL byte"))?;
@@ -101,11 +96,16 @@ mod linux {
                     None,
                     ptr::null_mut(),
                 );
-                Ok(Self {
+                let terminal = Self {
                     widget,
                     feed_child,
+                    set_foreground,
+                    set_background,
+                    set_colors,
                     _library: library,
-                })
+                };
+                terminal.apply_palette(colors);
+                Ok(terminal)
             }
         }
 
@@ -120,6 +120,24 @@ mod linux {
             unsafe { (self.feed_child)(self.widget, command.as_ptr(), -1) }
             Ok(())
         }
+
+        pub fn apply_palette(&self, colors: &crate::theme::TerminalPalette) {
+            let foreground = rgba(colors.foreground);
+            let background = rgba(colors.background);
+            let palette = colors.ansi.map(rgba);
+            // SAFETY: widget and function pointers remain valid while the VTE library is retained.
+            unsafe {
+                (self.set_foreground)(self.widget, &foreground);
+                (self.set_background)(self.widget, &background);
+                (self.set_colors)(
+                    self.widget,
+                    &foreground,
+                    &background,
+                    palette.as_ptr(),
+                    palette.len(),
+                );
+            }
+        }
     }
 
     fn rgba(rgb: usize) -> Rgba {
@@ -129,27 +147,6 @@ mod linux {
             blue: (rgb & 0xff) as f64 / 255.0,
             alpha: 1.0,
         }
-    }
-
-    fn terminal_palette() -> [Rgba; 16] {
-        [
-            rgba(0x1c1c1c),
-            rgba(0xbf6069),
-            rgba(0x6bb37c),
-            rgba(0xe7a96b),
-            rgba(0x8ad1ff),
-            rgba(0xcc8ad4),
-            rgba(0x50aab3),
-            rgba(0xdbdbdb),
-            rgba(0x595959),
-            rgba(0xd98088),
-            rgba(0x8dcc9a),
-            rgba(0xf0c987),
-            rgba(0xa7ddff),
-            rgba(0xdda5e3),
-            rgba(0x75c7ce),
-            rgba(0xffffff),
-        ]
     }
 
     struct Library(*mut c_void);

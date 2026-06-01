@@ -31,7 +31,7 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::ptr;
 
-    use crate::config::{ProjectConfig, Settings};
+    use crate::config::{ProjectConfig, Settings, UiThemeMode};
     use crate::index::Index;
     use crate::lsp;
     use crate::workspace::Workspace;
@@ -50,8 +50,9 @@ mod linux {
     }
 
     struct Tab {
-        path: PathBuf,
+        path: Option<PathBuf>,
         page: Widget,
+        label: Widget,
         editor: scintilla::Editor,
         is_binary: bool,
     }
@@ -69,6 +70,7 @@ mod linux {
         tree_store: TreeStore,
         explorer: Widget,
         terminal_widget: Widget,
+        css_provider: Widget,
         settings: Settings,
         index: Index,
         lsp: lsp::Manager,
@@ -83,6 +85,7 @@ mod linux {
 
     const GTK_WINDOW_TOPLEVEL: c_int = 0;
     const GTK_FILE_CHOOSER_ACTION_OPEN: c_int = 0;
+    const GTK_FILE_CHOOSER_ACTION_SAVE: c_int = 1;
     const GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER: c_int = 2;
     const GTK_RESPONSE_ACCEPT: c_int = -3;
     const GTK_RESPONSE_CANCEL: c_int = -6;
@@ -100,6 +103,8 @@ mod linux {
     const GDK_KEY_KP_ENTER: u32 = 0xff8d;
     const GDK_KEY_LOWER_S: u32 = b's' as u32;
     const GDK_KEY_UPPER_S: u32 = b'S' as u32;
+    const GDK_KEY_LOWER_N: u32 = b'n' as u32;
+    const GDK_KEY_UPPER_N: u32 = b'N' as u32;
     const GDK_KEY_LOWER_B: u32 = b'b' as u32;
     const GDK_KEY_UPPER_B: u32 = b'B' as u32;
     const GDK_KEY_LOWER_D: u32 = b'd' as u32;
@@ -149,6 +154,7 @@ mod linux {
         ) -> Widget;
         fn gtk_native_dialog_run(dialog: Widget) -> c_int;
         fn gtk_file_chooser_get_filename(chooser: Widget) -> *mut c_char;
+        fn gtk_file_chooser_set_do_overwrite_confirmation(chooser: Widget, confirm: c_int);
         fn gtk_main();
         fn gtk_main_quit();
         fn gtk_window_new(kind: c_int) -> Widget;
@@ -185,6 +191,7 @@ mod linux {
         fn gtk_notebook_set_current_page(notebook: Widget, page: c_int);
         fn gtk_notebook_set_scrollable(notebook: Widget, scrollable: c_int);
         fn gtk_label_new(text: *const c_char) -> Widget;
+        fn gtk_label_set_text(label: Widget, text: *const c_char);
         fn gtk_container_add(container: Widget, widget: Widget);
         fn gtk_widget_grab_focus(widget: Widget);
         fn gtk_widget_show(widget: Widget);
@@ -192,6 +199,18 @@ mod linux {
         fn gtk_widget_hide(widget: Widget);
         fn gtk_widget_get_visible(widget: Widget) -> c_int;
         fn gtk_widget_destroy(widget: Widget);
+        fn gtk_css_provider_new() -> Widget;
+        fn gtk_css_provider_load_from_data(
+            css_provider: Widget,
+            data: *const c_char,
+            length: isize,
+            error: *mut Widget,
+        ) -> c_int;
+        fn gtk_style_context_add_provider_for_screen(
+            screen: Widget,
+            provider: Widget,
+            priority: u32,
+        );
         fn gtk_scrolled_window_new(hadjustment: Widget, vadjustment: Widget) -> Widget;
         fn gtk_scrolled_window_set_policy(scrolled: Widget, horizontal: c_int, vertical: c_int);
         fn gtk_scrolled_window_set_min_content_width(scrolled: Widget, width: c_int);
@@ -236,6 +255,11 @@ mod linux {
             model: *mut TreeModel,
             iter: *mut TreeIter,
         ) -> c_int;
+    }
+
+    #[link(name = "gdk-3")]
+    unsafe extern "C" {
+        fn gdk_screen_get_default() -> Widget;
     }
 
     #[link(name = "gobject-2.0")]
@@ -320,8 +344,13 @@ mod linux {
             let vertical = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
             let notebook = gtk_notebook_new();
             gtk_notebook_set_scrollable(notebook, 1);
-            let terminal =
-                crate::vte::Terminal::new(&workspace.root, &settings.terminal.shell).ok();
+            let scheme = crate::theme::load_scheme(&settings.editor.theme);
+            let terminal = crate::vte::Terminal::new(
+                &workspace.root,
+                &settings.terminal.shell,
+                &scheme.terminal,
+            )
+            .ok();
             let terminal_widget = terminal
                 .as_ref()
                 .map(crate::vte::Terminal::widget)
@@ -335,6 +364,7 @@ mod linux {
                 tree_store: ptr::null_mut(),
                 explorer: ptr::null_mut(),
                 terminal_widget,
+                css_provider: install_css_provider()?,
                 settings,
                 index: build_index(workspace)?,
                 lsp: lsp::Manager::new(&workspace.root, lsp_commands),
@@ -362,6 +392,7 @@ mod linux {
             let explorer = build_explorer(state_ptr)?;
             state.explorer = explorer;
             state.window = window;
+            state.apply_appearance_settings()?;
             state.restore_welcome_page();
 
             let menu = build_menu(state_ptr);
@@ -386,7 +417,11 @@ mod linux {
     impl AppState {
         unsafe fn open_file(&mut self, path: &Path) -> io::Result<()> {
             let path = fs::canonicalize(path)?;
-            if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.path.as_ref() == Some(&path))
+            {
                 // SAFETY: notebook and tab editor widget remain alive for the GTK loop.
                 unsafe {
                     let page = gtk_notebook_page_num(self.notebook, tab.page);
@@ -398,8 +433,24 @@ mod linux {
             let bytes = fs::read(&path)?;
             let (contents, is_binary) = match String::from_utf8(bytes) {
                 Ok(text) => (text, false),
-                Err(_) => ("Not valid UTF-8 — cannot display this file.".to_string(), true),
+                Err(_) => (
+                    "Not valid UTF-8 — cannot display this file.".to_string(),
+                    true,
+                ),
             };
+            unsafe { self.open_tab(Some(path), &contents, is_binary) }
+        }
+
+        unsafe fn new_tab(&mut self) -> io::Result<()> {
+            unsafe { self.open_tab(None, "", false) }
+        }
+
+        unsafe fn open_tab(
+            &mut self,
+            path: Option<PathBuf>,
+            contents: &str,
+            is_binary: bool,
+        ) -> io::Result<()> {
             let editor = scintilla::Editor::new()?;
             editor.set_line_number_margin(48);
             editor.set_font(
@@ -411,10 +462,10 @@ mod linux {
                 self.settings.editor.tab_width,
                 self.settings.editor.insert_spaces,
             );
-            editor.set_text(&contents)?;
+            editor.set_text(contents)?;
             let palette = crate::theme::load(&self.settings.editor.theme);
             editor.apply_palette(&palette);
-            if !is_binary {
+            if !is_binary && let Some(path) = &path {
                 if is_c_file(&path) {
                     editor.configure_c_lexer(&palette)?;
                 } else if let Some(lexer) = lexer_for_path(&path) {
@@ -443,7 +494,8 @@ mod linux {
                 );
             }
             let tab_name = path
-                .file_name()
+                .as_ref()
+                .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy())
                 .unwrap_or_else(|| "Untitled".into());
             // SAFETY: editor is a GTK widget and notebook retains it after append.
@@ -452,7 +504,8 @@ mod linux {
                 let page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
                 gtk_box_pack_start(page, editor.widget(), 1, 1, 0);
                 let tab_label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-                gtk_box_pack_start(tab_label_box, label(&tab_name), 0, 0, 0);
+                let tab_label = label(&tab_name);
+                gtk_box_pack_start(tab_label_box, tab_label, 0, 0, 0);
                 let close_text = CString::new("\u{00d7}").unwrap();
                 let close_btn = gtk_button_new_with_label(close_text.as_ptr());
                 gtk_button_set_relief(close_btn, GTK_RELIEF_NONE);
@@ -464,13 +517,24 @@ mod linux {
                 });
                 let close_data_ptr = close_data_box.as_ref() as *const CloseTabData as *mut c_void;
                 self.close_data.push(close_data_box);
-                connect(close_btn, "clicked", on_close_tab as *const c_void, close_data_ptr);
+                connect(
+                    close_btn,
+                    "clicked",
+                    on_close_tab as *const c_void,
+                    close_data_ptr,
+                );
                 let page_number = gtk_notebook_append_page(self.notebook, page, tab_label_box);
                 gtk_widget_show(editor.widget());
                 gtk_widget_show(page);
                 gtk_notebook_set_current_page(self.notebook, page_number);
                 gtk_widget_grab_focus(editor.widget());
-                self.tabs.push(Tab { path, page, editor, is_binary });
+                self.tabs.push(Tab {
+                    path,
+                    page,
+                    label: tab_label,
+                    editor,
+                    is_binary,
+                });
                 if was_empty && !self.welcome_page.is_null() {
                     let welcome_num = gtk_notebook_page_num(self.notebook, self.welcome_page);
                     if welcome_num >= 0 {
@@ -483,13 +547,38 @@ mod linux {
         }
 
         unsafe fn save_active(&mut self) -> io::Result<()> {
-            let Some(tab) = (unsafe { self.active_tab() }) else {
+            let Some(index) = (unsafe { self.active_tab_index() }) else {
                 return Ok(());
             };
-            if tab.is_binary {
+            if self.tabs[index].is_binary {
                 return Ok(());
             }
-            let path = tab.path.clone();
+            let path = match self.tabs[index].path.clone() {
+                Some(path) => path,
+                None => {
+                    let Some(path) = (unsafe { self.save_file_dialog() }) else {
+                        return Ok(());
+                    };
+                    let tab_name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_else(|| "Untitled".into());
+                    let tab_name = CString::new(tab_name.as_bytes())
+                        .map_err(|_| io::Error::other("file name contains a NUL byte"))?;
+                    unsafe { gtk_label_set_text(self.tabs[index].label, tab_name.as_ptr()) };
+                    self.tabs[index].path = Some(path.clone());
+                    let palette = crate::theme::load(&self.settings.editor.theme);
+                    if is_c_file(&path) {
+                        self.tabs[index].editor.configure_c_lexer(&palette)?;
+                    } else if let Some(lexer) = lexer_for_path(&path) {
+                        self.tabs[index]
+                            .editor
+                            .configure_basic_lexer(lexer, &palette)?;
+                    }
+                    path
+                }
+            };
+            let tab = &self.tabs[index];
             let bytes = tab.editor.text_bytes();
             fs::write(&path, &bytes)?;
             tab.editor.set_save_point();
@@ -500,7 +589,11 @@ mod linux {
             if self.lsp.sync(&path, &source).is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let diagnostics = self.lsp.diagnostics(&path);
-                if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
+                if let Some(tab) = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.path.as_ref() == Some(&path))
+                {
                     tab.editor.show_diagnostics(
                         &diagnostics
                             .iter()
@@ -514,7 +607,7 @@ mod linux {
         }
 
         unsafe fn run_active(&self) -> io::Result<()> {
-            let file = unsafe { self.active_tab() }.map(|tab| tab.path.as_path());
+            let file = unsafe { self.active_tab() }.and_then(|tab| tab.path.as_deref());
             let command = crate::run::command_for(&self.config, &self.root, file)
                 .unwrap_or_else(|| "printf 'nokin: no run command configured\\n'".into());
             if let Some(terminal) = &self._terminal {
@@ -530,6 +623,14 @@ mod linux {
             self.tabs
                 .iter()
                 .find(|tab| unsafe { gtk_notebook_page_num(self.notebook, tab.page) == page })
+        }
+
+        unsafe fn active_tab_index(&self) -> Option<usize> {
+            // SAFETY: notebook and editor widgets remain live for the GTK loop.
+            let page = unsafe { gtk_notebook_get_current_page(self.notebook) };
+            self.tabs
+                .iter()
+                .position(|tab| unsafe { gtk_notebook_page_num(self.notebook, tab.page) == page })
         }
 
         unsafe fn edit_active(&self, edit: EditAction) {
@@ -567,14 +668,15 @@ mod linux {
         unsafe fn goto_definition(&mut self) -> io::Result<()> {
             let lsp_position = self.pending_lsp_position.take().or_else(|| {
                 let tab = unsafe { self.active_tab() }?;
+                let path = tab.path.clone()?;
                 let (line, column) = tab.editor.cursor_line_column();
-                Some((tab.path.clone(), line, column))
+                Some((path, line, column))
             });
             if let Some((file, line, column)) = lsp_position {
                 let source = self
                     .tabs
                     .iter()
-                    .find(|tab| tab.path == file)
+                    .find(|tab| tab.path.as_ref() == Some(&file))
                     .map(|tab| String::from_utf8_lossy(&tab.editor.text_bytes()).into_owned())
                     .unwrap_or_else(|| fs::read_to_string(&file).unwrap_or_default());
                 match self.lsp.definition(&file, &source, line, column) {
@@ -763,7 +865,11 @@ mod linux {
 
         fn refresh_semantic_tokens(&mut self, file: &Path, source: &str) -> io::Result<()> {
             let tokens = self.lsp.semantic_tokens(file, source)?;
-            if let Some(tab) = self.tabs.iter().find(|tab| tab.path == file) {
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.path.as_deref() == Some(file))
+            {
                 tab.editor.show_semantic_tokens(
                     &tokens
                         .iter()
@@ -776,9 +882,10 @@ mod linux {
 
         unsafe fn active_lsp_context(&self) -> Option<(PathBuf, String, usize, usize)> {
             let tab = unsafe { self.active_tab() }?;
+            let path = tab.path.clone()?;
             let (line, column) = tab.editor.cursor_line_column();
             Some((
-                tab.path.clone(),
+                path,
                 String::from_utf8_lossy(&tab.editor.text_bytes()).into_owned(),
                 line,
                 column,
@@ -796,7 +903,7 @@ mod linux {
                 let source = self
                     .tabs
                     .iter()
-                    .find(|tab| tab.path == file)
+                    .find(|tab| tab.path.as_ref() == Some(&file))
                     .map(|tab| String::from_utf8_lossy(&tab.editor.text_bytes()).into_owned())
                     .unwrap_or_else(|| fs::read_to_string(&file).unwrap_or_default());
                 let relevant = edits
@@ -805,7 +912,11 @@ mod linux {
                     .cloned()
                     .collect::<Vec<_>>();
                 let updated = lsp::apply_text_edits(&source, &relevant);
-                if let Some(tab) = self.tabs.iter().find(|tab| tab.path == file) {
+                if let Some(tab) = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.path.as_ref() == Some(&file))
+                {
                     tab.editor.replace_text(&updated)?;
                 } else {
                     fs::write(file, updated)?;
@@ -862,6 +973,27 @@ mod linux {
                 add_dialog_button(dialog, "_Cancel", GTK_RESPONSE_CANCEL);
                 add_dialog_button(dialog, "_Save", GTK_RESPONSE_ACCEPT);
                 let content = gtk_dialog_get_content_area(dialog);
+                section_row(content, "Appearance");
+                let ui_modes = ["system", "color-scheme"];
+                let ui_theme_mode = combo_row(
+                    content,
+                    "UI theme:",
+                    &ui_modes,
+                    self.settings.ui.theme_mode.as_str(),
+                );
+                let ui_font_family =
+                    command_row(content, "UI font family:", &self.settings.ui.font_family)?;
+                let ui_font_size = command_row(
+                    content,
+                    "UI font size:",
+                    &self.settings.ui.font_size.to_string(),
+                )?;
+                let ui_scale = command_row(
+                    content,
+                    "UI scale (0.75 - 2.0):",
+                    &self.settings.ui.scale.to_string(),
+                )?;
+                section_row(content, "Editor");
                 let font_family =
                     command_row(content, "Font family:", &self.settings.editor.font_family)?;
                 let font_size = command_row(
@@ -882,16 +1014,19 @@ mod linux {
                 let theme_names = crate::theme::list();
                 let theme_refs: Vec<&str> = theme_names.iter().map(String::as_str).collect();
                 let theme = combo_row(content, "Theme:", &theme_refs, &self.settings.editor.theme);
+                section_row(content, "Workspace");
                 let close_tabs_on_open = check_row(
                     content,
                     "Close open files when switching folders",
                     self.settings.workspace.close_tabs_on_folder_open,
                 );
+                section_row(content, "Terminal");
                 let shell = command_row(
                     content,
                     "Shell (next launch):",
                     &self.settings.terminal.shell,
                 )?;
+                section_row(content, "Language Servers");
                 let clangd = command_row(content, "clangd command:", &self.settings.lsp.clangd)?;
                 let rust_analyzer = command_row(
                     content,
@@ -900,6 +1035,15 @@ mod linux {
                 )?;
                 gtk_widget_show_all(dialog);
                 if gtk_dialog_run(dialog) == GTK_RESPONSE_ACCEPT {
+                    if let Some(mode) =
+                        combo_active_text(ui_theme_mode).and_then(|mode| UiThemeMode::parse(&mode))
+                    {
+                        self.settings.ui.theme_mode = mode;
+                    }
+                    self.settings.ui.font_family = entry_text(ui_font_family);
+                    self.settings.ui.font_size =
+                        parse_bounded_entry(ui_font_size, "UI font size", 6.0, 32.0)?;
+                    self.settings.ui.scale = parse_bounded_entry(ui_scale, "UI scale", 0.75, 2.0)?;
                     self.settings.editor.font_family = entry_text(font_family);
                     self.settings.editor.font_size = parse_entry(font_size, "font size")?;
                     self.settings.editor.tab_width = parse_entry(tab_width, "tab width")?;
@@ -922,6 +1066,7 @@ mod linux {
                         },
                     );
                     self.apply_editor_settings()?;
+                    self.apply_appearance_settings()?;
                 }
                 gtk_widget_destroy(dialog);
             }
@@ -941,11 +1086,40 @@ mod linux {
                     self.settings.editor.insert_spaces,
                 );
                 tab.editor.apply_palette(&palette);
-                if is_c_file(&tab.path) {
-                    tab.editor.refresh_c_function_highlighting()?;
-                } else if let Some(lexer) = lexer_for_path(&tab.path) {
-                    tab.editor.configure_basic_lexer(lexer, &palette)?;
+                if let Some(path) = &tab.path {
+                    if is_c_file(path) {
+                        tab.editor.refresh_c_function_highlighting()?;
+                    } else if let Some(lexer) = lexer_for_path(path) {
+                        tab.editor.configure_basic_lexer(lexer, &palette)?;
+                    }
                 }
+            }
+            Ok(())
+        }
+
+        fn apply_appearance_settings(&self) -> io::Result<()> {
+            let scheme = crate::theme::load_scheme(&self.settings.editor.theme);
+            let css = appearance_css(&self.settings, &scheme.ui);
+            let css =
+                CString::new(css).map_err(|_| io::Error::other("UI CSS contains a NUL byte"))?;
+            // SAFETY: provider, explorer, and terminal remain live during the GTK loop.
+            unsafe {
+                if gtk_css_provider_load_from_data(
+                    self.css_provider,
+                    css.as_ptr(),
+                    -1,
+                    ptr::null_mut(),
+                ) == 0
+                {
+                    return Err(io::Error::other("failed to apply UI theme CSS"));
+                }
+                gtk_scrolled_window_set_min_content_width(
+                    self.explorer,
+                    (220.0 * self.settings.ui.scale).round() as c_int,
+                );
+            }
+            if let Some(terminal) = &self._terminal {
+                terminal.apply_palette(&scheme.terminal);
             }
             Ok(())
         }
@@ -984,6 +1158,40 @@ mod linux {
                 }
             }
             Ok(())
+        }
+
+        unsafe fn save_file_dialog(&self) -> Option<PathBuf> {
+            // SAFETY: the dialog is created, run, and released on this main thread.
+            unsafe {
+                let title = CString::new("Save File").unwrap();
+                let accept = CString::new("Save").unwrap();
+                let cancel = CString::new("Cancel").unwrap();
+                let dialog = gtk_file_chooser_native_new(
+                    title.as_ptr(),
+                    self.window,
+                    GTK_FILE_CHOOSER_ACTION_SAVE,
+                    accept.as_ptr(),
+                    cancel.as_ptr(),
+                );
+                gtk_file_chooser_set_do_overwrite_confirmation(dialog, 1);
+                let response = gtk_native_dialog_run(dialog);
+                let path = if response == GTK_RESPONSE_ACCEPT {
+                    let filename = gtk_file_chooser_get_filename(dialog);
+                    if filename.is_null() {
+                        None
+                    } else {
+                        let path = PathBuf::from(std::ffi::OsStr::from_bytes(
+                            CStr::from_ptr(filename).to_bytes(),
+                        ));
+                        g_free(filename.cast());
+                        Some(path)
+                    }
+                } else {
+                    None
+                };
+                g_object_unref(dialog);
+                path
+            }
         }
 
         unsafe fn open_folder_dialog(&mut self) -> io::Result<()> {
@@ -1080,7 +1288,9 @@ mod linux {
                 let welcome_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
                 gtk_box_pack_start(
                     welcome_box,
-                    label("Open a file or folder to get started\n\nFile  \u{2192}  Open File...\nFile  \u{2192}  Open Folder..."),
+                    label(
+                        "Open a file or folder to get started\n\nFile  \u{2192}  Open File...\nFile  \u{2192}  Open Folder...",
+                    ),
                     1,
                     1,
                     0,
@@ -1094,6 +1304,7 @@ mod linux {
         unsafe fn active_extension(&self) -> Option<&str> {
             unsafe { self.active_tab() }?
                 .path
+                .as_deref()?
                 .extension()
                 .and_then(|extension| extension.to_str())
         }
@@ -1113,6 +1324,12 @@ mod linux {
         unsafe {
             let bar = gtk_menu_bar_new();
             let file = submenu(bar, "_File");
+            menu_action(
+                file,
+                "_New File",
+                on_new_file_activate as *const c_void,
+                state.cast(),
+            );
             menu_action(
                 file,
                 "Open _File...",
@@ -1290,6 +1507,69 @@ mod linux {
         }
     }
 
+    unsafe fn install_css_provider() -> io::Result<Widget> {
+        unsafe {
+            let screen = gdk_screen_get_default();
+            if screen.is_null() {
+                return Err(io::Error::other("GTK screen is not available"));
+            }
+            let provider = gtk_css_provider_new();
+            if provider.is_null() {
+                return Err(io::Error::other("GTK CSS provider creation failed"));
+            }
+            gtk_style_context_add_provider_for_screen(screen, provider, 600);
+            Ok(provider)
+        }
+    }
+
+    fn appearance_css(settings: &Settings, palette: &crate::theme::UiPalette) -> String {
+        let scale = settings.ui.scale;
+        let font_size = settings.ui.font_size * scale;
+        let compact = (3.0 * scale).round() as usize;
+        let regular = (6.0 * scale).round() as usize;
+        let wide = (10.0 * scale).round() as usize;
+        let font_family = css_string(&settings.ui.font_family);
+        let mut css = format!(
+            "* {{ font-family: \"{font_family}\"; font-size: {font_size:.2}pt; }}\n\
+             button, entry, combobox {{ padding: {compact}px {regular}px; }}\n\
+             menuitem {{ padding: {compact}px {wide}px; }}\n\
+             notebook tab {{ padding: {compact}px {regular}px; }}\n\
+             treeview {{ padding: {compact}px; }}\n"
+        );
+        if settings.ui.theme_mode == UiThemeMode::ColorScheme {
+            css.push_str(&format!(
+                "window, dialog, menubar, menu, notebook, treeview, .view {{ color: {}; background-color: {}; }}\n\
+                 menubar, menu, notebook header, treeview, entry, combobox, button {{ color: {}; background-color: {}; }}\n\
+                 button:hover, menuitem:hover, notebook tab:hover {{ background-color: {}; }}\n\
+                 button:checked, notebook tab:checked, treeview:selected, menuitem:hover {{ color: {}; background-color: {}; }}\n\
+                 entry, combobox, button, notebook header, scrolledwindow {{ border-color: {}; }}\n\
+                 separator {{ background-color: {}; }}\n",
+                css_color(palette.foreground),
+                css_color(palette.background),
+                css_color(palette.foreground),
+                css_color(palette.panel),
+                css_color(palette.raised),
+                css_color(palette.selection_foreground),
+                css_color(palette.selection_background),
+                css_color(palette.border),
+                css_color(palette.border),
+            ));
+        }
+        css
+    }
+
+    fn css_color(color: usize) -> String {
+        format!("#{:06x}", color & 0xffffff)
+    }
+
+    fn css_string(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    unsafe fn section_row(container: Widget, title: &str) {
+        unsafe { gtk_box_pack_start(container, label(title), 0, 1, 8) };
+    }
+
     unsafe fn command_row(container: Widget, title: &str, value: &str) -> io::Result<Widget> {
         let row = unsafe { gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8) };
         unsafe { gtk_box_pack_start(container, row, 0, 1, 4) };
@@ -1395,6 +1675,22 @@ mod linux {
         unsafe { entry_text(entry) }
             .parse()
             .map_err(|_| io::Error::other(format!("invalid {name}")))
+    }
+
+    unsafe fn parse_bounded_entry(
+        entry: Widget,
+        name: &str,
+        min: f64,
+        max: f64,
+    ) -> io::Result<f64> {
+        let value: f64 = unsafe { parse_entry(entry, name) }?;
+        if (min..=max).contains(&value) {
+            Ok(value)
+        } else {
+            Err(io::Error::other(format!(
+                "{name} must be between {min} and {max}"
+            )))
+        }
     }
 
     unsafe fn build_explorer(state: *mut AppState) -> io::Result<Widget> {
@@ -1558,6 +1854,11 @@ mod linux {
                 state.toggle_terminal();
                 Ok(())
             } else if event.state & GDK_CONTROL_MASK != 0
+                && matches!(event.keyval, GDK_KEY_LOWER_N | GDK_KEY_UPPER_N)
+            {
+                state.last_shortcut = Some((event.time, event.keyval));
+                state.new_tab()
+            } else if event.state & GDK_CONTROL_MASK != 0
                 && matches!(event.keyval, GDK_KEY_LOWER_S | GDK_KEY_UPPER_S)
             {
                 state.last_shortcut = Some((event.time, event.keyval));
@@ -1601,7 +1902,7 @@ mod linux {
                 }
                 _ => {}
             }
-            if is_c_file(&tab.path)
+            if tab.path.as_deref().is_some_and(is_c_file)
                 && let Err(error) = tab.editor.refresh_c_function_highlighting()
             {
                 eprintln!("nokin: {error}");
@@ -1630,7 +1931,7 @@ mod linux {
                 .find(|tab| tab.editor.widget() == widget)
                 .and_then(|tab| {
                     let (line, column) = tab.editor.line_column_at_point(event.x, event.y)?;
-                    Some((tab.path.clone(), line, column))
+                    Some((tab.path.clone()?, line, column))
                 });
             if state.pending_definition.is_some() {
                 unsafe { g_idle_add(on_goto_definition_idle, data) };
@@ -1643,6 +1944,13 @@ mod linux {
     unsafe extern "C" fn on_open_file_activate(_item: Widget, data: *mut c_void) {
         // SAFETY: callback data points to AppState for the duration of gtk_main.
         if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).open_file_dialog() } {
+            eprintln!("nokin: {error}");
+        }
+    }
+
+    unsafe extern "C" fn on_new_file_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).new_tab() } {
             eprintln!("nokin: {error}");
         }
     }
@@ -1921,7 +2229,11 @@ mod linux {
 
     fn build_index(workspace: &Workspace) -> io::Result<Index> {
         let mut index = Index::default();
-        for file in workspace.c_files()?.into_iter().chain(workspace.rs_files()?) {
+        for file in workspace
+            .c_files()?
+            .into_iter()
+            .chain(workspace.rs_files()?)
+        {
             if let Ok(source) = fs::read_to_string(&file) {
                 index.update(&file, &source);
             }
@@ -1939,6 +2251,24 @@ mod linux {
             assert_eq!(lexer_for_path(Path::new("script.py")), Some("python"));
             assert_eq!(lexer_for_path(Path::new("Makefile")), Some("makefile"));
             assert_eq!(lexer_for_path(Path::new("notes.txt")), None);
+        }
+
+        #[test]
+        fn system_css_keeps_gtk_colors_and_scheme_css_overrides_them() {
+            let mut settings = Settings::default();
+            settings.ui.font_family = "Font \"Quoted\"".into();
+            settings.ui.scale = 1.25;
+            let palette = crate::theme::load_scheme("tango-dark").ui;
+
+            let system = appearance_css(&settings, &palette);
+            assert!(system.contains("Font \\\"Quoted\\\""));
+            assert!(system.contains("12.50pt"));
+            assert!(!system.contains("background-color"));
+
+            settings.ui.theme_mode = UiThemeMode::ColorScheme;
+            let themed = appearance_css(&settings, &palette);
+            assert!(themed.contains("background-color"));
+            assert!(themed.contains(&css_color(palette.background)));
         }
     }
 }

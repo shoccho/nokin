@@ -58,6 +58,7 @@ nokin src/main.rs       # opens a single file (parent dir becomes workspace)
 
 | Key | Action |
 |-----|--------|
+| `Ctrl+N` | Create a new untitled tab |
 | `Ctrl+S` | Save current file |
 | `F5` | Run the project command in the terminal |
 | `F12` | Go to definition |
@@ -80,6 +81,12 @@ User settings are stored at `~/.config/nokin/settings.toml`. The file is created
 when you save from the Settings dialog (Edit → Settings), but you can also edit it by hand:
 
 ```toml
+[ui]
+theme_mode = "system"
+font_family = "Sans"
+font_size = 10.0
+scale = 1.0
+
 [editor]
 font_family = "Monospace"
 font_size = 11.0
@@ -97,6 +104,11 @@ shell = "/bin/bash"
 clangd = "clangd"
 rust_analyzer = "rust-analyzer"
 ```
+
+`ui.theme_mode` accepts `system` to follow the active GTK theme or `color-scheme` to derive the
+application UI colors from the selected Geany color scheme. The UI font and `scale` apply to menus,
+tabs, the explorer, dialogs, and controls outside the editor. Supported UI scale values are `0.75`
+through `2.0`.
 
 ### Project configuration
 
@@ -122,6 +134,9 @@ in the integrated terminal. Available placeholders: `${file}`, `${file_dir}`, `$
 
 Nokin uses [Geany](https://www.geany.org/)'s color scheme format. To install a theme, place any
 Geany `.conf` file in `~/.config/nokin/themes/` and select it from Edit → Settings.
+
+The selected scheme always colors the editor and integrated terminal. When `ui.theme_mode` is
+`color-scheme`, Nokin also derives application UI colors from it.
 
 A large collection of themes is available at
 [github.com/geany/geany-themes](https://github.com/geany/geany-themes). Download any `.conf`
