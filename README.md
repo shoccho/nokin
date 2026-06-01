@@ -1,73 +1,77 @@
 # Nokin
 
-Nokin is a Linux-only GTK3 code editor prototype written in Rust. This repository contains the
-application core and a native GTK3 shell. Pinned Scintilla and Lexilla sources are fetched locally
-and intentionally excluded from Git.
+A lightweight code editor for Linux built around a fast native editor widget. Supports syntax
+highlighting for most common languages, an integrated terminal, and LSP-powered code intelligence
+for Rust and C/C++.
 
-## Current implementation
+## Features
 
-- GTK3 window with lazy file explorer, notebook editor, and vertically split terminal regions.
-- Explorer single-click file selection opens a tab or focuses the existing tab for that path.
-- Scintilla `5.6.2` editor widget with Lexilla `5.4.8` highlighting for common languages and
-  formats, plain-text fallback, initial-file loading, line-number margin, and fractional font
-  sizing.
-- Theme system using Geany-compatible `.conf` color scheme files loaded from
-  `~/.config/nokin/themes/`; selectable per-user from the Settings dialog. C token and
-  local-function styling, folding markers, lexer fold properties, indentation guides, tab
-  indentation, backspace unindent, and brace-aware newline indentation follow the active theme.
-- Basic File, Edit, View, Build, and Navigate application menus.
-- Runtime-loaded GTK3 VTE `2.91` boundary with an `abc-dark` terminal palette, persistent
-  workspace-rooted shell spawn, and command injection API. The UI shows a fallback when VTE is
-  not installed.
-- Workspace resolution from `nokin [path]`.
-- User and project configuration parsing.
-- Shell-escaped F5 command selection and placeholder expansion.
-- `Ctrl+S` saves the active buffer, `F5` injects the selected command into the terminal,
-  and `F12` or `Ctrl+click` performs syntactic C go-to-definition from the workspace symbol index.
-- `Ctrl+B` toggles the explorer and `Ctrl+J` toggles the terminal panel.
-- `Ctrl+D` selects the word at the caret and adds the next matching occurrence on repeated presses.
-- Build-menu command configuration for the workspace fallback and the active file extension,
-  persisted to project-local `.nokin.toml`.
-- An Edit-menu settings dialog persists font, indentation, shell, and theme settings.
-- Paired delimiters, closing-delimiter skipping, indentation helpers, and C identifier completion.
-- C workspace walking, transitive include resolution, and a Tree-sitter C symbol index.
-- Lazy LSP integration for Rust through `rust-analyzer` and C/C++ through `clangd`: definitions,
-  completion lists, hover calltips, references, rename workspace edits, document formatting, and
-  diagnostic squiggles. Tree-sitter C navigation remains the fallback.
+- Syntax highlighting for C, Rust, Python, JavaScript, HTML, CSS, JSON, YAML, TOML, Markdown,
+  Lua, Ruby, SQL, shell scripts, and more
+- Integrated terminal panel sharing the workspace directory
+- LSP code intelligence: completions, hover docs, go-to-definition, find references, rename,
+  inline diagnostics, and document formatting
+- Go-to-definition for C even without a language server, using a workspace symbol index
+- File explorer with lazy directory loading
+- Tabbed editing with multi-select (Ctrl+D)
+- Geany-compatible color themes — drop any Geany `.conf` theme file in and it works
+- Per-project build and run commands with path placeholders
+- Auto-pairing of brackets and quotes, brace-aware indentation, backspace unindent
 
-The visible GTK shell is usable for opening, editing, saving, and running files. Explorer
-create/rename/delete actions, dirty close prompts, paired-delimiter and completion event handlers,
-split synchronization, and navigation UI remain to be wired.
-
-## Native dependencies
-
-Install Linux development dependencies:
+## Requirements
 
 ```sh
 sudo apt install libgtk-3-dev libvte-2.91-dev pkg-config g++
 ```
 
-Fetch the pinned native sources before the first build:
+Also requires Rust (stable). Install from [rustup.rs](https://rustup.rs) if needed.
+
+For LSP support: install `clangd` (C/C++) and/or `rust-analyzer` (Rust) and make sure they are
+on your `PATH`.
+
+## Building
+
+Fetch the bundled editor library sources, then build:
 
 ```sh
 ./scripts/fetch-native.sh
-cargo build
+cargo build --release
 ```
 
-The fetch script downloads the official Scintilla `5.6.2` and Lexilla `5.4.8` source archives,
-verifies pinned SHA-256 checksums, and extracts them under the ignored `vendor/` directory. The
-native build compiles their C++ sources into the application and keeps raw pointer handling in
-dedicated audited FFI crates.
-GTK3 VTE `2.91` is likewise exposed through a narrow runtime-loaded FFI module. Rust protects
-application logic; GTK3, VTE, Scintilla, Lexilla, and Tree-sitter remain native-code
-dependencies. GTK3 Rust bindings are intentionally avoided in the current shell.
+The binary will be at `target/release/nokin`. You can copy it anywhere on your `PATH`.
 
-Nokin application code is licensed under the MIT License. Fetched native dependencies retain
-their upstream licenses.
+## Running
+
+```sh
+nokin                   # opens current directory as workspace
+nokin /path/to/project  # opens a directory as workspace
+nokin src/main.rs       # opens a single file (parent dir becomes workspace)
+```
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+S` | Save current file |
+| `F5` | Run the project command in the terminal |
+| `F12` | Go to definition |
+| `Ctrl+click` | Go to definition |
+| `Ctrl+Space` | Trigger completion |
+| `Ctrl+Shift+Space` | Show signature help |
+| `Ctrl+K` | Show hover documentation |
+| `Ctrl+.` | Code actions |
+| `F2` | Rename symbol |
+| `Ctrl+Shift+I` | Format document |
+| `Ctrl+D` | Select word at cursor; repeat to add next match |
+| `Ctrl+B` | Toggle file explorer |
+| `Ctrl+J` | Toggle terminal panel |
+
+References, diagnostics, and semantic token refresh are available from the Navigate menu.
 
 ## Configuration
 
-User settings live at `~/.config/nokin/settings.toml`:
+User settings are stored at `~/.config/nokin/settings.toml`. The file is created automatically
+when you save from the Settings dialog (Edit → Settings), but you can also edit it by hand:
 
 ```toml
 [editor]
@@ -88,46 +92,45 @@ clangd = "clangd"
 rust_analyzer = "rust-analyzer"
 ```
 
-Project settings live at `.nokin.toml`:
+### Project configuration
+
+Drop a `.nokin.toml` in your project root to configure build and run commands:
 
 ```toml
 [run]
 workspace = "make run"
 
 [run.files]
-c = "cc ${file} -o /tmp/nokin-run && /tmp/nokin-run"
+c = "cc ${file} -o /tmp/out && /tmp/out"
+rs = "cargo run"
 
 [c]
 compiler = "cc"
 include_dirs = ["include", "../shared/include"]
 ```
 
-Project run commands are trusted workspace configuration and execute in the integrated shell.
-Supported path placeholders are `${file}`, `${file_dir}`, and `${workspace}`.
+`F5` runs the command for the active file's extension, falling back to `workspace`. Commands run
+in the integrated terminal. Available placeholders: `${file}`, `${file_dir}`, `${workspace}`.
 
 ## Themes
 
-Nokin uses [Geany](https://www.geany.org/)'s color scheme format (`.conf` files). Place any
-Geany theme file in `~/.config/nokin/themes/` and it will appear in the Settings dialog.
+Nokin uses [Geany](https://www.geany.org/)'s color scheme format. To install a theme, place any
+Geany `.conf` file in `~/.config/nokin/themes/` and select it from Edit → Settings.
 
-A large collection of ready-to-use themes is available from the
-[geany-themes](https://github.com/geany/geany-themes) repository. Download any `.conf` file
-from there and drop it into `~/.config/nokin/themes/`.
+A large collection of themes is available at
+[github.com/geany/geany-themes](https://github.com/geany/geany-themes). Download any `.conf`
+file and drop it into `~/.config/nokin/themes/`.
 
-The `colorschemes/` directory in this repository contains a couple of reference schemes for
-development and testing. Each file retains its original copyright and license header.
+If you want to configure extra line spacing or caret width in a theme, add a `[styling]` section:
 
-## Verification
-
-```sh
-cargo test
-cargo run -- .
+```ini
+[styling]
+line_height = 2;2
+caret_width = 2
 ```
 
-Tree-sitter fallback navigation is syntactic and may be imperfect around preprocessing,
-conditional compilation, generated headers, and compile flags. LSP shortcuts are `Ctrl+Space`
-for completion, `Ctrl+Shift+Space` for signature help, `Ctrl+K` for hover, `Ctrl+.` for code
-actions, `F2` for rename, and `Ctrl+Shift+I` for formatting. References, diagnostics refresh,
-and semantic-token refresh are available from the Navigate menu. Server commands are configurable
-in the Settings dialog. Code actions that require executing an LSP command without a workspace edit
-are reported but are not executed automatically.
+## License
+
+Nokin is MIT licensed. Scintilla and Lexilla are compiled into the binary and their copyright
+notice is reproduced in the `NOTICES` file as required by their license. GTK3 and VTE are
+dynamically linked system libraries under LGPL v2.1+.
