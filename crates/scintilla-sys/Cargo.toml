@@ -1,0 +1,9 @@
+[package]
+name = "scintilla-sys"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+links = "scintilla"
+
+[lib]
+path = "src/lib.rs"
