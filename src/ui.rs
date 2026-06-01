@@ -30,6 +30,7 @@ mod linux {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::ptr;
+    use std::time::SystemTime;
 
     use crate::config::{ProjectConfig, Settings, UiThemeMode};
     use crate::index::Index;
@@ -68,6 +69,7 @@ mod linux {
         window: Widget,
         notebook: Widget,
         tree_store: TreeStore,
+        tree: Widget,
         explorer: Widget,
         terminal_widget: Widget,
         css_provider: Widget,
@@ -80,6 +82,8 @@ mod linux {
         tabs: Vec<Tab>,
         close_data: Vec<Box<CloseTabData>>,
         welcome_page: Widget,
+        explorer_context_dir: PathBuf,
+        explorer_snapshot: Vec<(PathBuf, Option<SystemTime>)>,
         _terminal: Option<crate::vte::Terminal>,
     }
 
@@ -155,6 +159,7 @@ mod linux {
         fn gtk_native_dialog_run(dialog: Widget) -> c_int;
         fn gtk_file_chooser_get_filename(chooser: Widget) -> *mut c_char;
         fn gtk_file_chooser_set_do_overwrite_confirmation(chooser: Widget, confirm: c_int);
+        fn gtk_file_chooser_set_current_folder(chooser: Widget, folder: *const c_char) -> c_int;
         fn gtk_main();
         fn gtk_main_quit();
         fn gtk_window_new(kind: c_int) -> Widget;
@@ -167,9 +172,11 @@ mod linux {
         fn gtk_entry_new() -> Widget;
         fn gtk_entry_get_text(entry: Widget) -> *const c_char;
         fn gtk_entry_set_text(entry: Widget, text: *const c_char);
+        fn gtk_event_box_new() -> Widget;
         fn gtk_paned_new(orientation: c_int) -> Widget;
         fn gtk_paned_pack1(paned: Widget, child: Widget, resize: c_int, shrink: c_int);
         fn gtk_paned_pack2(paned: Widget, child: Widget, resize: c_int, shrink: c_int);
+        fn gtk_paned_set_position(paned: Widget, position: c_int);
         fn gtk_box_new(orientation: c_int, spacing: c_int) -> Widget;
         fn gtk_box_pack_start(
             container: Widget,
@@ -183,6 +190,7 @@ mod linux {
         fn gtk_menu_shell_append(menu: Widget, child: Widget);
         fn gtk_menu_item_new_with_mnemonic(label: *const c_char) -> Widget;
         fn gtk_menu_item_set_submenu(item: Widget, submenu: Widget);
+        fn gtk_menu_popup_at_pointer(menu: Widget, event: *const ButtonEvent);
         fn gtk_separator_menu_item_new() -> Widget;
         fn gtk_notebook_new() -> Widget;
         fn gtk_notebook_append_page(notebook: Widget, child: Widget, label: Widget) -> c_int;
@@ -242,7 +250,27 @@ mod linux {
         );
         fn gtk_tree_view_append_column(tree: Widget, column: Widget) -> c_int;
         fn gtk_tree_view_expand_row(tree: Widget, path: TreePath, open_all: c_int) -> c_int;
+        fn gtk_tree_view_set_enable_tree_lines(tree: Widget, enabled: c_int);
+        fn gtk_tree_view_set_level_indentation(tree: Widget, indentation: c_int);
+        fn gtk_tree_view_get_path_at_pos(
+            tree: Widget,
+            x: c_int,
+            y: c_int,
+            path: *mut TreePath,
+            column: *mut Widget,
+            cell_x: *mut c_int,
+            cell_y: *mut c_int,
+        ) -> c_int;
+        fn gtk_tree_view_map_expanded_rows(
+            tree: Widget,
+            function: unsafe extern "C" fn(Widget, TreePath, *mut c_void),
+            data: *mut c_void,
+        );
+        fn gtk_tree_path_new_from_string(path: *const c_char) -> TreePath;
+        fn gtk_tree_path_to_string(path: TreePath) -> *mut c_char;
+        fn gtk_tree_path_free(path: TreePath);
         fn gtk_cell_renderer_text_new() -> Widget;
+        fn gtk_cell_renderer_pixbuf_new() -> Widget;
         fn gtk_tree_model_get_iter(model: TreeModel, iter: *mut TreeIter, path: TreePath) -> c_int;
         fn gtk_tree_model_iter_children(
             model: TreeModel,
@@ -250,11 +278,7 @@ mod linux {
             parent: *const TreeIter,
         ) -> c_int;
         fn gtk_tree_model_get(model: TreeModel, iter: *const TreeIter, ...);
-        fn gtk_tree_selection_get_selected(
-            selection: Widget,
-            model: *mut TreeModel,
-            iter: *mut TreeIter,
-        ) -> c_int;
+        fn gtk_tree_selection_select_path(selection: Widget, path: TreePath);
     }
 
     #[link(name = "gdk-3")]
@@ -279,6 +303,11 @@ mod linux {
     unsafe extern "C" {
         fn g_free(memory: *mut c_void);
         fn g_idle_add(
+            function: unsafe extern "C" fn(*mut c_void) -> c_int,
+            data: *mut c_void,
+        ) -> u32;
+        fn g_timeout_add_seconds(
+            interval: u32,
             function: unsafe extern "C" fn(*mut c_void) -> c_int,
             data: *mut c_void,
         ) -> u32;
@@ -362,6 +391,7 @@ mod linux {
                 window: ptr::null_mut(),
                 notebook,
                 tree_store: ptr::null_mut(),
+                tree: ptr::null_mut(),
                 explorer: ptr::null_mut(),
                 terminal_widget,
                 css_provider: install_css_provider()?,
@@ -374,6 +404,8 @@ mod linux {
                 tabs: Vec::new(),
                 close_data: Vec::new(),
                 welcome_page: ptr::null_mut(),
+                explorer_context_dir: workspace.root.clone(),
+                explorer_snapshot: Vec::new(),
                 _terminal: terminal,
             });
             let state_ptr = (&mut *state) as *mut AppState;
@@ -391,6 +423,7 @@ mod linux {
             );
             let explorer = build_explorer(state_ptr)?;
             state.explorer = explorer;
+            state.explorer_snapshot = explorer_snapshot(&state.root)?;
             state.window = window;
             state.apply_appearance_settings()?;
             state.restore_welcome_page();
@@ -401,6 +434,7 @@ mod linux {
             gtk_paned_pack2(horizontal, vertical, 1, 0);
             gtk_paned_pack1(vertical, notebook, 1, 0);
             gtk_paned_pack2(vertical, terminal_widget, 0, 0);
+            gtk_paned_set_position(vertical, 520);
             gtk_box_pack_start(content, menu, 0, 0, 0);
             gtk_box_pack_start(content, horizontal, 1, 1, 0);
             gtk_container_add(window, content);
@@ -409,6 +443,7 @@ mod linux {
                 state.open_file(path)?;
             }
             gtk_widget_show_all(window);
+            g_timeout_add_seconds(2, on_refresh_explorer_timeout, state_ptr.cast());
             gtk_main();
         }
         Ok(())
@@ -458,6 +493,7 @@ mod linux {
                 &self.settings.editor.font_family,
                 self.settings.editor.font_size,
             )?;
+            editor.set_ligatures(self.settings.editor.ligatures);
             editor.configure_indentation(
                 self.settings.editor.tab_width,
                 self.settings.editor.insert_spaces,
@@ -504,13 +540,21 @@ mod linux {
                 let page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
                 gtk_box_pack_start(page, editor.widget(), 1, 1, 0);
                 let tab_label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+                let tab_event_box = gtk_event_box_new();
                 let tab_label = label(&tab_name);
                 gtk_box_pack_start(tab_label_box, tab_label, 0, 0, 0);
                 let close_text = CString::new("\u{00d7}").unwrap();
                 let close_btn = gtk_button_new_with_label(close_text.as_ptr());
                 gtk_button_set_relief(close_btn, GTK_RELIEF_NONE);
                 gtk_box_pack_start(tab_label_box, close_btn, 0, 0, 0);
-                gtk_widget_show_all(tab_label_box);
+                gtk_container_add(tab_event_box, tab_label_box);
+                gtk_widget_show_all(tab_event_box);
+                connect(
+                    tab_event_box,
+                    "button-press-event",
+                    on_tab_label_button_press as *const c_void,
+                    (self as *mut AppState).cast(),
+                );
                 let close_data_box = Box::new(CloseTabData {
                     state: self as *mut AppState,
                     page,
@@ -523,7 +567,7 @@ mod linux {
                     on_close_tab as *const c_void,
                     close_data_ptr,
                 );
-                let page_number = gtk_notebook_append_page(self.notebook, page, tab_label_box);
+                let page_number = gtk_notebook_append_page(self.notebook, page, tab_event_box);
                 gtk_widget_show(editor.widget());
                 gtk_widget_show(page);
                 gtk_notebook_set_current_page(self.notebook, page_number);
@@ -582,6 +626,9 @@ mod linux {
             let bytes = tab.editor.text_bytes();
             fs::write(&path, &bytes)?;
             tab.editor.set_save_point();
+            if path == self.root.join(".nokin.toml") {
+                self.config = ProjectConfig::load(&self.root)?;
+            }
             if is_c_file(&path) {
                 self.index.update(&path, &String::from_utf8_lossy(&bytes));
             }
@@ -603,10 +650,12 @@ mod linux {
                 }
                 self.refresh_semantic_tokens(&path, &source)?;
             }
+            unsafe { self.refresh_explorer()? };
             Ok(())
         }
 
-        unsafe fn run_active(&self) -> io::Result<()> {
+        unsafe fn run_active(&mut self) -> io::Result<()> {
+            self.config = ProjectConfig::load(&self.root)?;
             let file = unsafe { self.active_tab() }.and_then(|tab| tab.path.as_deref());
             let command = crate::run::command_for(&self.config, &self.root, file)
                 .unwrap_or_else(|| "printf 'nokin: no run command configured\\n'".into());
@@ -928,6 +977,7 @@ mod linux {
         unsafe fn configure_build_commands(&mut self) -> io::Result<()> {
             // SAFETY: dialog widgets remain live until the modal dialog is destroyed below.
             unsafe {
+                self.config = ProjectConfig::load(&self.root)?;
                 let dialog = gtk_dialog_new();
                 set_window_title(dialog, "Set Build Commands")?;
                 add_dialog_button(dialog, "_Cancel", GTK_RESPONSE_CANCEL);
@@ -968,6 +1018,7 @@ mod linux {
         unsafe fn configure_settings(&mut self) -> io::Result<()> {
             // SAFETY: dialog widgets remain live until the modal dialog is destroyed below.
             unsafe {
+                self.settings = Settings::load()?;
                 let dialog = gtk_dialog_new();
                 set_window_title(dialog, "Settings")?;
                 add_dialog_button(dialog, "_Cancel", GTK_RESPONSE_CANCEL);
@@ -1011,6 +1062,11 @@ mod linux {
                     "Use spaces for indentation (instead of tabs)",
                     self.settings.editor.insert_spaces,
                 );
+                let ligatures = check_row(
+                    content,
+                    "Enable editor font ligatures",
+                    self.settings.editor.ligatures,
+                );
                 let theme_names = crate::theme::list();
                 let theme_refs: Vec<&str> = theme_names.iter().map(String::as_str).collect();
                 let theme = combo_row(content, "Theme:", &theme_refs, &self.settings.editor.theme);
@@ -1049,6 +1105,7 @@ mod linux {
                     self.settings.editor.tab_width = parse_entry(tab_width, "tab width")?;
                     self.settings.editor.insert_spaces =
                         gtk_toggle_button_get_active(insert_spaces) != 0;
+                    self.settings.editor.ligatures = gtk_toggle_button_get_active(ligatures) != 0;
                     if let Some(t) = combo_active_text(theme) {
                         self.settings.editor.theme = t;
                     }
@@ -1081,6 +1138,7 @@ mod linux {
                     &self.settings.editor.font_family,
                     self.settings.editor.font_size,
                 )?;
+                tab.editor.set_ligatures(self.settings.editor.ligatures);
                 tab.editor.configure_indentation(
                     self.settings.editor.tab_width,
                     self.settings.editor.insert_spaces,
@@ -1173,6 +1231,8 @@ mod linux {
                     accept.as_ptr(),
                     cancel.as_ptr(),
                 );
+                let root = CString::new(self.root.as_os_str().as_bytes()).ok()?;
+                gtk_file_chooser_set_current_folder(dialog, root.as_ptr());
                 gtk_file_chooser_set_do_overwrite_confirmation(dialog, 1);
                 let response = gtk_native_dialog_run(dialog);
                 let path = if response == GTK_RESPONSE_ACCEPT {
@@ -1241,8 +1301,9 @@ mod linux {
                 .map_err(|_| io::Error::other("workspace path contains a NUL byte"))?;
             // SAFETY: window remains live for the duration of gtk_main.
             unsafe { gtk_window_set_title(self.window, title.as_ptr()) };
-            unsafe { gtk_tree_store_clear(self.tree_store) };
-            unsafe { append_directory_children(self.tree_store, ptr::null(), &self.root)? };
+            self.explorer_context_dir = self.root.clone();
+            self.explorer_snapshot.clear();
+            unsafe { self.refresh_explorer()? };
             let workspace = crate::workspace::Workspace {
                 root: self.root.clone(),
                 initial_file: None,
@@ -1260,6 +1321,61 @@ mod linux {
                 let path_str = self.root.to_string_lossy();
                 let escaped = path_str.replace('\'', "'\\''");
                 let _ = terminal.feed_command(&format!("cd '{escaped}'"));
+            }
+            Ok(())
+        }
+
+        unsafe fn refresh_explorer(&mut self) -> io::Result<()> {
+            let snapshot = explorer_snapshot(&self.root)?;
+            if snapshot == self.explorer_snapshot {
+                return Ok(());
+            }
+            let mut expanded = Vec::<String>::new();
+            let result = unsafe {
+                gtk_tree_view_map_expanded_rows(
+                    self.tree,
+                    collect_expanded_path,
+                    (&mut expanded as *mut Vec<String>).cast(),
+                );
+                gtk_tree_store_clear(self.tree_store);
+                append_directory_children(self.tree_store, ptr::null(), &self.root)?;
+                for path in expanded {
+                    let path = CString::new(path).unwrap();
+                    let tree_path = gtk_tree_path_new_from_string(path.as_ptr());
+                    if !tree_path.is_null() {
+                        gtk_tree_view_expand_row(self.tree, tree_path, 0);
+                        gtk_tree_path_free(tree_path);
+                    }
+                }
+                Ok::<(), io::Error>(())
+            };
+            result?;
+            self.explorer_snapshot = snapshot;
+            Ok(())
+        }
+
+        unsafe fn create_explorer_entry(&mut self, directory: bool) -> io::Result<()> {
+            let kind = if directory { "Folder" } else { "File" };
+            let Some(name) = (unsafe { prompt_dialog(&format!("New {kind}"), "Name:")? }) else {
+                return Ok(());
+            };
+            if Path::new(&name).components().count() != 1 || name == "." || name == ".." {
+                return Err(io::Error::other(
+                    "name must be a single file or folder name",
+                ));
+            }
+            let path = self.explorer_context_dir.join(name);
+            if directory {
+                fs::create_dir(&path)?;
+            } else {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?;
+            }
+            unsafe { self.refresh_explorer()? };
+            if !directory {
+                unsafe { self.open_file(&path)? };
             }
             Ok(())
         }
@@ -1696,16 +1812,23 @@ mod linux {
     unsafe fn build_explorer(state: *mut AppState) -> io::Result<Widget> {
         // SAFETY: GTK copies model values; state remains boxed for the GTK loop.
         unsafe {
-            let store = gtk_tree_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+            let store = gtk_tree_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
             (*state).tree_store = store;
             append_directory_children(store, ptr::null(), &(*state).root)?;
             let tree = gtk_tree_view_new_with_model(store);
+            (*state).tree = tree;
             gtk_tree_view_set_headers_visible(tree, 0);
+            gtk_tree_view_set_enable_tree_lines(tree, 1);
+            gtk_tree_view_set_level_indentation(tree, 12);
+            let icon_renderer = gtk_cell_renderer_pixbuf_new();
             let renderer = gtk_cell_renderer_text_new();
             let text = CString::new("text").unwrap();
+            let icon_name = CString::new("icon-name").unwrap();
             let column = gtk_tree_view_column_new();
+            gtk_tree_view_column_pack_start(column, icon_renderer, 0);
+            gtk_tree_view_column_add_attribute(column, icon_renderer, icon_name.as_ptr(), 0);
             gtk_tree_view_column_pack_start(column, renderer, 1);
-            gtk_tree_view_column_add_attribute(column, renderer, text.as_ptr(), 0);
+            gtk_tree_view_column_add_attribute(column, renderer, text.as_ptr(), 1);
             gtk_tree_view_append_column(tree, column);
             connect(
                 tree,
@@ -1713,17 +1836,16 @@ mod linux {
                 on_row_activated as *const c_void,
                 state.cast(),
             );
-            let selection = gtk_tree_view_get_selection(tree);
-            connect(
-                selection,
-                "changed",
-                on_tree_selection_changed as *const c_void,
-                state.cast(),
-            );
             connect(
                 tree,
                 "test-expand-row",
                 on_test_expand_row as *const c_void,
+                state.cast(),
+            );
+            connect(
+                tree,
+                "button-press-event",
+                on_explorer_button_press as *const c_void,
                 state.cast(),
             );
             let scrolled = gtk_scrolled_window_new(ptr::null_mut(), ptr::null_mut());
@@ -1765,6 +1887,29 @@ mod linux {
         Ok(())
     }
 
+    fn explorer_snapshot(root: &Path) -> io::Result<Vec<(PathBuf, Option<SystemTime>)>> {
+        let mut snapshot = Vec::new();
+        append_directory_snapshot(root, &mut snapshot)?;
+        snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(snapshot)
+    }
+
+    fn append_directory_snapshot(
+        directory: &Path,
+        snapshot: &mut Vec<(PathBuf, Option<SystemTime>)>,
+    ) -> io::Result<()> {
+        snapshot.push((
+            directory.to_path_buf(),
+            fs::metadata(directory)?.modified().ok(),
+        ));
+        for entry in fs::read_dir(directory)?.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = append_directory_snapshot(&entry.path(), snapshot);
+            }
+        }
+        Ok(())
+    }
+
     unsafe fn set_tree_row(
         store: TreeStore,
         iter: *mut TreeIter,
@@ -1775,8 +1920,28 @@ mod linux {
             CString::new(display).map_err(|_| io::Error::other("file name contains a NUL byte"))?;
         let path = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| io::Error::other("file path contains a NUL byte"))?;
+        let icon = if path.as_bytes().is_empty() {
+            ""
+        } else if Path::new(std::ffi::OsStr::from_bytes(path.as_bytes())).is_dir() {
+            "folder-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        };
+        let icon = CString::new(icon).unwrap();
         // SAFETY: column indexes and value types match the GtkTreeStore declaration.
-        unsafe { gtk_tree_store_set(store, iter, 0, display.as_ptr(), 1, path.as_ptr(), -1) };
+        unsafe {
+            gtk_tree_store_set(
+                store,
+                iter,
+                0,
+                icon.as_ptr(),
+                1,
+                display.as_ptr(),
+                2,
+                path.as_ptr(),
+                -1,
+            )
+        };
         Ok(())
     }
 
@@ -1797,6 +1962,135 @@ mod linux {
             } else if let Err(error) = state.open_file(&file) {
                 eprintln!("nokin: could not open {}: {error}", file.display());
             }
+        }
+    }
+
+    unsafe extern "C" fn collect_expanded_path(_tree: Widget, path: TreePath, data: *mut c_void) {
+        // SAFETY: GTK owns path during this callback and data points to the temporary vector.
+        unsafe {
+            let text = gtk_tree_path_to_string(path);
+            if !text.is_null() {
+                (*data.cast::<Vec<String>>()).push(CStr::from_ptr(text).to_string_lossy().into());
+                g_free(text.cast());
+            }
+        }
+    }
+
+    unsafe extern "C" fn on_refresh_explorer_timeout(data: *mut c_void) -> c_int {
+        // SAFETY: AppState remains boxed for the GTK loop.
+        let state = unsafe { &mut *data.cast::<AppState>() };
+        if let Err(error) = unsafe { state.refresh_explorer() } {
+            eprintln!("nokin: could not refresh explorer: {error}");
+        }
+        1
+    }
+
+    unsafe extern "C" fn on_explorer_button_press(
+        tree: Widget,
+        event: *const ButtonEvent,
+        data: *mut c_void,
+    ) -> c_int {
+        // SAFETY: callback data, tree, and event remain valid for this signal.
+        unsafe {
+            let event = &*event;
+            if event.button == 1 {
+                let mut tree_path = ptr::null_mut();
+                if gtk_tree_view_get_path_at_pos(
+                    tree,
+                    event.x as c_int,
+                    event.y as c_int,
+                    &mut tree_path,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ) != 0
+                {
+                    let state = &mut *data.cast::<AppState>();
+                    if let Some(path) = model_path(state.tree_store, tree_path)
+                        && path.is_file()
+                        && let Err(error) = state.open_file(&path)
+                    {
+                        eprintln!("nokin: could not open {}: {error}", path.display());
+                    }
+                    gtk_tree_path_free(tree_path);
+                }
+                return 0;
+            }
+            if event.button != 3 {
+                return 0;
+            }
+            let state = &mut *data.cast::<AppState>();
+            let mut tree_path = ptr::null_mut();
+            if gtk_tree_view_get_path_at_pos(
+                tree,
+                event.x as c_int,
+                event.y as c_int,
+                &mut tree_path,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) != 0
+            {
+                let selection = gtk_tree_view_get_selection(tree);
+                gtk_tree_selection_select_path(selection, tree_path);
+                if let Some(path) = model_path(state.tree_store, tree_path) {
+                    state.explorer_context_dir = if path.is_dir() {
+                        path
+                    } else {
+                        path.parent().unwrap_or(&state.root).to_path_buf()
+                    };
+                }
+                gtk_tree_path_free(tree_path);
+            } else {
+                state.explorer_context_dir = state.root.clone();
+            }
+            let menu = gtk_menu_new();
+            menu_action(
+                menu,
+                "New _File...",
+                on_create_file_activate as *const c_void,
+                data,
+            );
+            menu_action(
+                menu,
+                "New Fol_der...",
+                on_create_folder_activate as *const c_void,
+                data,
+            );
+            gtk_menu_shell_append(menu, gtk_separator_menu_item_new());
+            menu_action(
+                menu,
+                "_Refresh",
+                on_refresh_explorer_activate as *const c_void,
+                data,
+            );
+            gtk_widget_show_all(menu);
+            gtk_menu_popup_at_pointer(menu, event);
+            1
+        }
+    }
+
+    unsafe extern "C" fn on_tab_label_button_press(
+        _label: Widget,
+        event: *const ButtonEvent,
+        data: *mut c_void,
+    ) -> c_int {
+        // SAFETY: callback data and event remain valid for this signal.
+        unsafe {
+            let event = &*event;
+            if event.button != 3 {
+                return 0;
+            }
+            let menu = gtk_menu_new();
+            menu_action(
+                menu,
+                "_Close All Files",
+                on_close_all_tabs_activate as *const c_void,
+                data,
+            );
+            gtk_widget_show_all(menu);
+            gtk_menu_popup_at_pointer(menu, event);
+            1
         }
     }
 
@@ -1955,6 +2249,28 @@ mod linux {
         }
     }
 
+    unsafe extern "C" fn on_create_file_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).create_explorer_entry(false) }
+        {
+            eprintln!("nokin: {error}");
+        }
+    }
+
+    unsafe extern "C" fn on_create_folder_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).create_explorer_entry(true) } {
+            eprintln!("nokin: {error}");
+        }
+    }
+
+    unsafe extern "C" fn on_refresh_explorer_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).refresh_explorer() } {
+            eprintln!("nokin: could not refresh explorer: {error}");
+        }
+    }
+
     unsafe extern "C" fn on_open_folder_activate(_item: Widget, data: *mut c_void) {
         // SAFETY: callback data points to AppState for the duration of gtk_main.
         if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).open_folder_dialog() } {
@@ -1983,6 +2299,11 @@ mod linux {
         }
     }
 
+    unsafe extern "C" fn on_close_all_tabs_activate(_item: Widget, data: *mut c_void) {
+        // SAFETY: callback data points to AppState for the duration of gtk_main.
+        unsafe { (&mut *data.cast::<AppState>()).close_all_tabs() };
+    }
+
     unsafe extern "C" fn on_save_activate(_item: Widget, data: *mut c_void) {
         // SAFETY: callback data points to AppState for the duration of gtk_main.
         if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).save_active() } {
@@ -1997,7 +2318,7 @@ mod linux {
 
     unsafe extern "C" fn on_run_activate(_item: Widget, data: *mut c_void) {
         // SAFETY: callback data points to AppState for the duration of gtk_main.
-        if let Err(error) = unsafe { (&*data.cast::<AppState>()).run_active() } {
+        if let Err(error) = unsafe { (&mut *data.cast::<AppState>()).run_active() } {
             eprintln!("nokin: {error}");
         }
     }
@@ -2061,26 +2382,6 @@ mod linux {
     lsp_callback!(on_lsp_diagnostics_activate, lsp_diagnostics);
     lsp_callback!(on_lsp_semantic_tokens_activate, lsp_semantic_tokens);
 
-    unsafe extern "C" fn on_tree_selection_changed(selection: Widget, data: *mut c_void) {
-        // SAFETY: callback data and selection remain live during gtk_main.
-        unsafe {
-            let state = &mut *data.cast::<AppState>();
-            let mut model = ptr::null_mut();
-            let mut iter = empty_iter();
-            if gtk_tree_selection_get_selected(selection, &mut model, &mut iter) == 0 {
-                return;
-            }
-            let Some(path) = iter_path(model, &iter) else {
-                return;
-            };
-            if path.is_file()
-                && let Err(error) = state.open_file(&path)
-            {
-                eprintln!("nokin: could not open {}: {error}", path.display());
-            }
-        }
-    }
-
     macro_rules! edit_callback {
         ($name:ident, $action:expr) => {
             unsafe extern "C" fn $name(_item: Widget, data: *mut c_void) {
@@ -2132,8 +2433,8 @@ mod linux {
 
     unsafe fn iter_path(model: TreeModel, iter: *const TreeIter) -> Option<PathBuf> {
         let mut text: *mut c_char = ptr::null_mut();
-        // SAFETY: column 1 is a G_TYPE_STRING and GTK allocates the returned string.
-        unsafe { gtk_tree_model_get(model, iter, 1, &mut text, -1) };
+        // SAFETY: column 2 is a G_TYPE_STRING and GTK allocates the returned string.
+        unsafe { gtk_tree_model_get(model, iter, 2, &mut text, -1) };
         if text.is_null() {
             return None;
         }

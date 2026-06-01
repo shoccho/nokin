@@ -32,6 +32,7 @@ pub struct EditorSettings {
     pub font_size: f64,
     pub tab_width: usize,
     pub insert_spaces: bool,
+    pub ligatures: bool,
     pub theme: String,
 }
 
@@ -81,6 +82,7 @@ impl Default for Settings {
                 font_size: 11.0,
                 tab_width: 4,
                 insert_spaces: true,
+                ligatures: true,
                 theme: "tango-dark".into(),
             },
             workspace: WorkspaceSettings::default(),
@@ -129,6 +131,9 @@ impl Settings {
                 settings.editor.insert_spaces =
                     value.parse().unwrap_or(settings.editor.insert_spaces)
             }
+            ("editor", "ligatures") => {
+                settings.editor.ligatures = value.parse().unwrap_or(settings.editor.ligatures)
+            }
             ("editor", "theme") => settings.editor.theme = unquote(value),
             ("workspace", "close_tabs_on_folder_open") => {
                 settings.workspace.close_tabs_on_folder_open = value
@@ -156,7 +161,7 @@ impl Settings {
 
     fn to_toml(&self) -> String {
         format!(
-            "[ui]\ntheme_mode = \"{}\"\nfont_family = \"{}\"\nfont_size = {}\nscale = {}\n\n[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\ntheme = \"{}\"\n\n[workspace]\nclose_tabs_on_folder_open = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
+            "[ui]\ntheme_mode = \"{}\"\nfont_family = \"{}\"\nfont_size = {}\nscale = {}\n\n[editor]\nfont_family = \"{}\"\nfont_size = {}\ntab_width = {}\ninsert_spaces = {}\nligatures = {}\ntheme = \"{}\"\n\n[workspace]\nclose_tabs_on_folder_open = {}\n\n[terminal]\nshell = \"{}\"\n\n[lsp]\nclangd = \"{}\"\nrust_analyzer = \"{}\"\n",
             self.ui.theme_mode.as_str(),
             escape_toml(&self.ui.font_family),
             self.ui.font_size,
@@ -165,6 +170,7 @@ impl Settings {
             self.editor.font_size,
             self.editor.tab_width,
             self.editor.insert_spaces,
+            self.editor.ligatures,
             escape_toml(&self.editor.theme),
             self.workspace.close_tabs_on_folder_open,
             escape_toml(&self.terminal.shell),

@@ -10,14 +10,27 @@ pub struct Palette {
     pub default_fg: usize,
     pub default_bg: usize,
     pub comment: usize,
+    pub comment_bold: bool,
+    pub comment_italic: bool,
     pub number: usize,
+    pub number_bold: bool,
+    pub number_italic: bool,
     pub keyword: usize,
     pub keyword_bold: bool,
+    pub keyword_italic: bool,
     pub string: usize,
+    pub string_bold: bool,
+    pub string_italic: bool,
     pub string_eol_bg: usize,
     pub preprocessor: usize,
+    pub preprocessor_bold: bool,
+    pub preprocessor_italic: bool,
     pub type_color: usize,
+    pub type_bold: bool,
+    pub type_italic: bool,
     pub function: usize,
+    pub function_bold: bool,
+    pub function_italic: bool,
     pub selection_fg: usize,
     pub selection_bg: usize,
     pub margin_fg: usize,
@@ -35,14 +48,27 @@ impl Default for Palette {
             default_fg: 0xdbdbdb,
             default_bg: 0x1c1c1c,
             comment: 0xadadad,
+            comment_bold: false,
+            comment_italic: false,
             number: 0x8ad1ff,
+            number_bold: false,
+            number_italic: false,
             keyword: 0xbf6069,
             keyword_bold: true,
+            keyword_italic: false,
             string: 0x6bb37c,
+            string_bold: false,
+            string_italic: false,
             string_eol_bg: 0x6e006e,
             preprocessor: 0x45bde6,
+            preprocessor_bold: false,
+            preprocessor_italic: false,
             type_color: 0x50aab3,
+            type_bold: false,
+            type_italic: false,
             function: 0xcc8ad4,
+            function_bold: false,
+            function_italic: false,
             selection_fg: 0x000000,
             selection_bg: 0xe7a96b,
             margin_fg: 0x6e6e6e,
@@ -58,7 +84,7 @@ impl Default for Palette {
 
 pub struct Editor {
     widget: NonNull<c_void>,
-    function_color: Cell<usize>,
+    function_style: Cell<(usize, bool, bool)>,
 }
 
 impl Editor {
@@ -70,7 +96,11 @@ impl Editor {
         NonNull::new(widget)
             .map(|widget| Self {
                 widget,
-                function_color: Cell::new(Palette::default().function),
+                function_style: Cell::new((
+                    Palette::default().function,
+                    Palette::default().function_bold,
+                    Palette::default().function_italic,
+                )),
             })
             .ok_or_else(|| io::Error::other("Scintilla widget creation failed"))
     }
@@ -97,7 +127,13 @@ impl Editor {
         )?;
         let function_style = self.send(sys::SCI_ALLOCATESUBSTYLES, 11, 1);
         if function_style >= 0 {
-            self.set_style(function_style as usize, palette.function, None, false, false);
+            self.set_style(
+                function_style as usize,
+                palette.function,
+                None,
+                palette.function_bold,
+                palette.function_italic,
+            );
         }
         self.configure_folding(palette);
         self.refresh_c_function_highlighting()?;
@@ -124,12 +160,13 @@ impl Editor {
         if function_style < 0 {
             return Ok(());
         }
+        let (color, bold, italic) = self.function_style.get();
         self.set_style(
             function_style as usize,
-            self.function_color.get(),
+            color,
             None,
-            false,
-            false,
+            bold,
+            italic,
         );
         let identifiers = c_function_identifiers(&self.text_bytes()).join(" ");
         let identifiers = CString::new(identifiers)
@@ -143,7 +180,8 @@ impl Editor {
     }
 
     pub fn apply_palette(&self, palette: &Palette) {
-        self.function_color.set(palette.function);
+        self.function_style
+            .set((palette.function, palette.function_bold, palette.function_italic));
 
         const DEFAULT: usize = 32;
         self.set_style(DEFAULT, palette.default_fg, Some(palette.default_bg), false, false);
@@ -163,19 +201,55 @@ impl Editor {
 
         // C/generic language style mapping (overridden by basic/rust lexer styles for non-C files)
         for style in [1, 2, 3, 15, 23, 24, 26] {
-            self.set_style(style, palette.comment, None, false, false);
+            self.set_style(
+                style,
+                palette.comment,
+                None,
+                palette.comment_bold,
+                palette.comment_italic,
+            );
         }
-        self.set_style(4, palette.number, None, false, false);
-        self.set_style(5, palette.keyword, None, palette.keyword_bold, false);
+        self.set_style(4, palette.number, None, palette.number_bold, palette.number_italic);
+        self.set_style(
+            5,
+            palette.keyword,
+            None,
+            palette.keyword_bold,
+            palette.keyword_italic,
+        );
         for style in [6, 7, 13, 20, 21, 22, 27] {
-            self.set_style(style, palette.string, None, false, false);
+            self.set_style(
+                style,
+                palette.string,
+                None,
+                palette.string_bold,
+                palette.string_italic,
+            );
         }
-        self.set_style(9, palette.preprocessor, None, false, false);
-        self.set_style(12, palette.string, Some(palette.string_eol_bg), false, false);
-        self.set_style(16, palette.keyword, None, palette.keyword_bold, false);
+        self.set_style(
+            9,
+            palette.preprocessor,
+            None,
+            palette.preprocessor_bold,
+            palette.preprocessor_italic,
+        );
+        self.set_style(
+            12,
+            palette.string,
+            Some(palette.string_eol_bg),
+            palette.string_bold,
+            palette.string_italic,
+        );
+        self.set_style(
+            16,
+            palette.keyword,
+            None,
+            palette.keyword_bold,
+            palette.keyword_italic,
+        );
         self.set_style(17, palette.comment, None, true, false);
         self.set_style(18, palette.comment, None, false, true);
-        self.set_style(19, palette.type_color, None, true, false);
+        self.set_style(19, palette.type_color, None, palette.type_bold, palette.type_italic);
     }
 
     pub fn set_line_number_margin(&self, pixels: usize) {
@@ -202,6 +276,12 @@ impl Editor {
         );
         self.send(sys::SCI_STYLECLEARALL, 0, 0);
         Ok(())
+    }
+
+    pub fn set_ligatures(&self, enabled: bool) {
+        // SAFETY: this updates the GTK Scintilla backend's process-wide Pango shaping option.
+        unsafe { sys::scintilla_set_ligatures(i32::from(enabled)) };
+        self.send(sys::SCI_STYLECLEARALL, 0, 0);
     }
 
     pub fn set_text(&self, text: &str) -> io::Result<()> {
@@ -530,36 +610,97 @@ impl Editor {
 
     fn apply_basic_lexer_styles(&self, palette: &Palette) {
         for style in [1, 2, 3, 12, 15, 23, 24] {
-            self.set_style(style, palette.comment, None, false, false);
+            self.set_style(
+                style,
+                palette.comment,
+                None,
+                palette.comment_bold,
+                palette.comment_italic,
+            );
         }
         for style in [4, 8, 13] {
-            self.set_style(style, palette.number, None, false, false);
+            self.set_style(style, palette.number, None, palette.number_bold, palette.number_italic);
         }
         for style in [5, 10, 16] {
-            self.set_style(style, palette.keyword, None, palette.keyword_bold, false);
+            self.set_style(
+                style,
+                palette.keyword,
+                None,
+                palette.keyword_bold,
+                palette.keyword_italic,
+            );
         }
         for style in [6, 7, 11, 14, 20, 21, 22] {
-            self.set_style(style, palette.string, None, false, false);
+            self.set_style(
+                style,
+                palette.string,
+                None,
+                palette.string_bold,
+                palette.string_italic,
+            );
         }
-        self.set_style(9, palette.preprocessor, None, false, false);
-        self.set_style(17, palette.function, None, false, false);
-        self.set_style(18, palette.type_color, None, true, false);
+        self.set_style(
+            9,
+            palette.preprocessor,
+            None,
+            palette.preprocessor_bold,
+            palette.preprocessor_italic,
+        );
+        self.set_style(
+            17,
+            palette.function,
+            None,
+            palette.function_bold,
+            palette.function_italic,
+        );
+        self.set_style(18, palette.type_color, None, palette.type_bold, palette.type_italic);
     }
 
     fn apply_rust_lexer_styles(&self, palette: &Palette) {
         for style in [1, 2, 3, 4] {
-            self.set_style(style, palette.comment, None, false, false);
+            self.set_style(
+                style,
+                palette.comment,
+                None,
+                palette.comment_bold,
+                palette.comment_italic,
+            );
         }
-        self.set_style(5, palette.number, None, false, false);
+        self.set_style(5, palette.number, None, palette.number_bold, palette.number_italic);
         for style in [6, 7, 8, 9, 10, 11, 12] {
-            self.set_style(style, palette.keyword, None, palette.keyword_bold, false);
+            self.set_style(
+                style,
+                palette.keyword,
+                None,
+                palette.keyword_bold,
+                palette.keyword_italic,
+            );
         }
         for style in [13, 14, 15, 21, 22, 23] {
-            self.set_style(style, palette.string, None, false, false);
+            self.set_style(
+                style,
+                palette.string,
+                None,
+                palette.string_bold,
+                palette.string_italic,
+            );
         }
-        self.set_style(18, palette.preprocessor, None, false, false);
-        self.set_style(19, palette.preprocessor, None, false, false);
-        self.set_style(20, palette.string, Some(palette.string_eol_bg), false, false);
+        for style in [18, 19] {
+            self.set_style(
+                style,
+                palette.preprocessor,
+                None,
+                palette.preprocessor_bold,
+                palette.preprocessor_italic,
+            );
+        }
+        self.set_style(
+            20,
+            palette.string,
+            Some(palette.string_eol_bg),
+            palette.string_bold,
+            palette.string_italic,
+        );
     }
 
     fn configure_folding(&self, palette: &Palette) {

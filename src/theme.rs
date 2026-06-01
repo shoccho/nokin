@@ -260,14 +260,27 @@ impl Theme {
             default_fg: default.fg,
             default_bg: default.bg.unwrap_or(0x1c1c1c),
             comment: comment.fg,
+            comment_bold: comment.bold,
+            comment_italic: comment.italic,
             number: number.fg,
+            number_bold: number.bold,
+            number_italic: number.italic,
             keyword: keyword.fg,
             keyword_bold: keyword.bold,
+            keyword_italic: keyword.italic,
             string: string.fg,
+            string_bold: string.bold,
+            string_italic: string.italic,
             string_eol_bg: string_eol.bg.unwrap_or(0x6e006e),
             preprocessor: preprocessor.fg,
+            preprocessor_bold: preprocessor.bold,
+            preprocessor_italic: preprocessor.italic,
             type_color: type_style.fg,
+            type_bold: type_style.bold,
+            type_italic: type_style.italic,
             function: function.fg,
+            function_bold: function.bold,
+            function_italic: function.italic,
             selection_fg: selection.fg,
             selection_bg: selection.bg.unwrap_or(0x404040),
             margin_fg: margin.fg,
@@ -297,6 +310,12 @@ impl Theme {
             return None;
         }
         let raw = self.styles.get(name)?;
+        let inherited = match &raw.fg {
+            Some(ColorRef::Named(n)) if !self.colors.contains_key(n.as_str()) => {
+                self.resolve_inner(n, depth + 1)
+            }
+            _ => None,
+        };
         let fg = match &raw.fg {
             Some(ColorRef::Literal(v)) => *v,
             Some(ColorRef::Named(n)) => {
@@ -327,8 +346,8 @@ impl Theme {
         Some(StyleValues {
             fg,
             bg,
-            bold: raw.bold,
-            italic: raw.italic,
+            bold: raw.bold || inherited.is_some_and(|style| style.bold),
+            italic: raw.italic || inherited.is_some_and(|style| style.italic),
         })
     }
 }
@@ -467,5 +486,23 @@ mod tests {
         assert_eq!(scheme.terminal.background, scheme.editor.default_bg);
         assert_eq!(scheme.terminal.ansi[1], scheme.editor.keyword);
         assert_ne!(scheme.ui.panel, scheme.ui.background);
+    }
+
+    #[test]
+    fn preserves_bold_and_italic_style_flags() {
+        let palette = Theme::parse(
+            "[named_styles]\n\
+             default=#fff;#000;false;false\n\
+             comment=#aaa;#000;false;true\n\
+             keyword=#f00;#000;true;true\n\
+             keyword_1=keyword\n\
+             string=#0f0;#000;false;true\n\
+             string_1=string\n",
+        )
+        .to_palette();
+        assert!(palette.comment_italic);
+        assert!(palette.keyword_bold);
+        assert!(palette.keyword_italic);
+        assert!(palette.string_italic);
     }
 }

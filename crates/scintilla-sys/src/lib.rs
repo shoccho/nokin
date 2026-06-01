@@ -85,6 +85,7 @@ pub const SCI_SETEXTRADESCENT: u32 = 2527;
 
 unsafe extern "C" {
     pub fn scintilla_new() -> Widget;
+    pub fn scintilla_set_ligatures(enabled: i32);
     pub fn scintilla_send_message(widget: Widget, message: u32, w_param: usize, l_param: isize)
     -> isize;
     pub fn CreateLexer(name: *const c_char) -> Lexer;

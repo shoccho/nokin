@@ -92,6 +92,7 @@ font_family = "Monospace"
 font_size = 11.0
 tab_width = 4
 insert_spaces = true
+ligatures = true
 theme = "tango-dark"
 
 [workspace]
