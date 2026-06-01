@@ -18,6 +18,12 @@ for Rust and C/C++.
 - Per-project build and run commands with path placeholders
 - Auto-pairing of brackets and quotes, brace-aware indentation, backspace unindent
 
+
+## Screenshot
+
+<img width="1119" height="802" alt="image" src="https://github.com/user-attachments/assets/843fbf25-d36a-46e7-85c9-577ba9dbb5d9" />
+
+
 ## Requirements
 
 ```sh
