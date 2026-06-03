@@ -4,6 +4,9 @@ A lightweight code editor for Linux built around a fast native editor widget. Su
 highlighting for most common languages, an integrated terminal, and LSP-powered code intelligence
 for Rust and C/C++.
 
+> Nokin is migrating to a native Rust desktop frontend for Windows, macOS, and Linux. The
+> in-progress frontend contains no browser or WebView layer. See [NATIVE_UI.md](NATIVE_UI.md).
+
 ## Features
 
 - Syntax highlighting for C, Rust, Python, JavaScript, HTML, CSS, JSON, YAML, TOML, Markdown,
@@ -77,7 +80,9 @@ References, diagnostics, and semantic token refresh are available from the Navig
 
 ## Configuration
 
-User settings are stored at `~/.config/nokin/settings.toml`. The file is created automatically
+User settings are stored in the platform configuration directory: `$XDG_CONFIG_HOME/nokin` or
+`~/.config/nokin` on Linux, `~/Library/Application Support/nokin` on macOS, and
+`%APPDATA%\nokin` on Windows. The `settings.toml` file is created automatically
 when you save from the Settings dialog (Edit → Settings), but you can also edit it by hand:
 
 ```toml
@@ -134,14 +139,15 @@ in the integrated terminal. Available placeholders: `${file}`, `${file_dir}`, `$
 ## Themes
 
 Nokin uses [Geany](https://www.geany.org/)'s color scheme format. To install a theme, place any
-Geany `.conf` file in `~/.config/nokin/themes/` and select it from Edit → Settings.
+Geany `.conf` file in the platform configuration directory under `nokin/themes/` and select it from
+Edit → Settings.
 
 The selected scheme always colors the editor and integrated terminal. When `ui.theme_mode` is
 `color-scheme`, Nokin also derives application UI colors from it.
 
 A large collection of themes is available at
 [github.com/geany/geany-themes](https://github.com/geany/geany-themes). Download any `.conf`
-file and drop it into `~/.config/nokin/themes/`.
+file and drop it into the platform configuration directory under `nokin/themes/`.
 
 If you want to configure extra line spacing or caret width in a theme, add a `[styling]` section:
 

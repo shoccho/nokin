@@ -1,7 +1,123 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use scintilla::Palette;
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub default_fg: usize,
+    pub default_bg: usize,
+    pub comment: usize,
+    pub comment_bold: bool,
+    pub comment_italic: bool,
+    pub number: usize,
+    pub number_bold: bool,
+    pub number_italic: bool,
+    pub keyword: usize,
+    pub keyword_bold: bool,
+    pub keyword_italic: bool,
+    pub string: usize,
+    pub string_bold: bool,
+    pub string_italic: bool,
+    pub string_eol_bg: usize,
+    pub preprocessor: usize,
+    pub preprocessor_bold: bool,
+    pub preprocessor_italic: bool,
+    pub type_color: usize,
+    pub type_bold: bool,
+    pub type_italic: bool,
+    pub function: usize,
+    pub function_bold: bool,
+    pub function_italic: bool,
+    pub selection_fg: usize,
+    pub selection_bg: usize,
+    pub margin_fg: usize,
+    pub caret: usize,
+    pub caret_width: usize,
+    pub current_line_bg: usize,
+    pub current_line_visible: bool,
+    pub extra_ascent: i32,
+    pub extra_descent: i32,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            default_fg: 0xdbdbdb,
+            default_bg: 0x1c1c1c,
+            comment: 0xadadad,
+            comment_bold: false,
+            comment_italic: false,
+            number: 0x8ad1ff,
+            number_bold: false,
+            number_italic: false,
+            keyword: 0xbf6069,
+            keyword_bold: true,
+            keyword_italic: false,
+            string: 0x6bb37c,
+            string_bold: false,
+            string_italic: false,
+            string_eol_bg: 0x6e006e,
+            preprocessor: 0x45bde6,
+            preprocessor_bold: false,
+            preprocessor_italic: false,
+            type_color: 0x50aab3,
+            type_bold: false,
+            type_italic: false,
+            function: 0xcc8ad4,
+            function_bold: false,
+            function_italic: false,
+            selection_fg: 0x000000,
+            selection_bg: 0xe7a96b,
+            margin_fg: 0x6e6e6e,
+            caret: 0xffffff,
+            caret_width: 1,
+            current_line_bg: 0x262626,
+            current_line_visible: true,
+            extra_ascent: 0,
+            extra_descent: 0,
+        }
+    }
+}
+
+#[cfg(feature = "gtk-ui")]
+impl From<&Palette> for scintilla::Palette {
+    fn from(palette: &Palette) -> Self {
+        Self {
+            default_fg: palette.default_fg,
+            default_bg: palette.default_bg,
+            comment: palette.comment,
+            comment_bold: palette.comment_bold,
+            comment_italic: palette.comment_italic,
+            number: palette.number,
+            number_bold: palette.number_bold,
+            number_italic: palette.number_italic,
+            keyword: palette.keyword,
+            keyword_bold: palette.keyword_bold,
+            keyword_italic: palette.keyword_italic,
+            string: palette.string,
+            string_bold: palette.string_bold,
+            string_italic: palette.string_italic,
+            string_eol_bg: palette.string_eol_bg,
+            preprocessor: palette.preprocessor,
+            preprocessor_bold: palette.preprocessor_bold,
+            preprocessor_italic: palette.preprocessor_italic,
+            type_color: palette.type_color,
+            type_bold: palette.type_bold,
+            type_italic: palette.type_italic,
+            function: palette.function,
+            function_bold: palette.function_bold,
+            function_italic: palette.function_italic,
+            selection_fg: palette.selection_fg,
+            selection_bg: palette.selection_bg,
+            margin_fg: palette.margin_fg,
+            caret: palette.caret,
+            caret_width: palette.caret_width,
+            current_line_bg: palette.current_line_bg,
+            current_line_visible: palette.current_line_visible,
+            extra_ascent: palette.extra_ascent,
+            extra_descent: palette.extra_descent,
+        }
+    }
+}
 
 /// All available theme names, scanned from theme directories in preference order.
 pub fn list() -> Vec<String> {
@@ -48,7 +164,7 @@ pub struct Scheme {
     pub terminal: TerminalPalette,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiPalette {
     pub foreground: usize,
     pub background: usize,
@@ -124,14 +240,14 @@ impl From<&Palette> for TerminalPalette {
 }
 
 /// Directories searched for theme `.conf` files, in order of preference:
-/// 1. User config dir  (~/.config/nokin/themes/)
+/// 1. User config dir (`config_directory()/themes`)
 /// 2. Next to the installed binary (themes/)
 /// 3. Source tree colorschemes/ dir used during development
 fn theme_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/nokin/themes"));
+    if let Some(config) = crate::config::config_directory() {
+        dirs.push(config.join("themes"));
     }
 
     if let Ok(exe) = std::env::current_exe() {

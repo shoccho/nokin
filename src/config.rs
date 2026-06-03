@@ -1,4 +1,6 @@
 use std::env;
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,7 +89,7 @@ impl Default for Settings {
             },
             workspace: WorkspaceSettings::default(),
             terminal: TerminalSettings {
-                shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                shell: default_shell(),
             },
             lsp: LspSettings {
                 clangd: "clangd".into(),
@@ -99,13 +101,10 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load() -> io::Result<Self> {
-        let Some(home) = env::var_os("HOME") else {
+        let Some(directory) = config_directory() else {
             return Ok(Self::default());
         };
-        load_optional(
-            &PathBuf::from(home).join(".config/nokin/settings.toml"),
-            Self::parse,
-        )
+        load_optional(&directory.join("settings.toml"), Self::parse)
     }
 
     pub fn parse(input: &str) -> Self {
@@ -151,12 +150,17 @@ impl Settings {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let Some(home) = env::var_os("HOME") else {
-            return Err(io::Error::other("HOME is not set"));
+        let Some(directory) = config_directory() else {
+            return Err(io::Error::other(
+                "the platform configuration directory is unavailable",
+            ));
         };
-        let directory = PathBuf::from(home).join(".config/nokin");
         fs::create_dir_all(&directory)?;
         fs::write(directory.join("settings.toml"), self.to_toml())
+    }
+
+    pub fn file_path() -> Option<PathBuf> {
+        config_directory().map(|directory| directory.join("settings.toml"))
     }
 
     fn to_toml(&self) -> String {
@@ -177,6 +181,52 @@ impl Settings {
             escape_toml(&self.lsp.clangd),
             escape_toml(&self.lsp.rust_analyzer),
         )
+    }
+}
+
+pub fn config_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        return env::var_os("APPDATA")
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .map(|home| PathBuf::from(home).join("AppData/Roaming").into_os_string())
+            })
+            .map(PathBuf::from)
+            .map(|directory| directory.join("nokin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library/Application Support/nokin"));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        unix_config_directory(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn unix_config_directory(
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")))
+        .map(|directory| directory.join("nokin"))
+}
+
+fn default_shell() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
     }
 }
 
@@ -378,6 +428,19 @@ mod tests {
         let finite = Settings::parse("[ui]\nfont_size = NaN\nscale = inf\n");
         assert_eq!(finite.ui.font_size, 10.0);
         assert_eq!(finite.ui.scale, 1.0);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn resolves_xdg_config_directory_with_home_fallback() {
+        assert_eq!(
+            unix_config_directory(Some("/tmp/xdg".into()), Some("/tmp/home".into())),
+            Some(PathBuf::from("/tmp/xdg/nokin"))
+        );
+        assert_eq!(
+            unix_config_directory(None, Some("/tmp/home".into())),
+            Some(PathBuf::from("/tmp/home/.config/nokin"))
+        );
     }
 
     #[test]

@@ -2,27 +2,54 @@ use std::io;
 
 use crate::workspace::Workspace;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gtk-ui", feature = "native-ui"))]
+compile_error!("enable exactly one UI frontend: `gtk-ui` or `native-ui`");
+
+#[cfg(not(any(feature = "gtk-ui", feature = "native-ui")))]
+compile_error!("enable one UI frontend: `gtk-ui` or `native-ui`");
+
+#[cfg(feature = "native-ui")]
+mod native;
+
+#[cfg(feature = "native-ui")]
+pub fn choose_workspace() -> io::Result<Option<std::path::PathBuf>> {
+    native::choose_workspace()
+}
+
+#[cfg(all(feature = "gtk-ui", not(feature = "native-ui"), target_os = "linux"))]
 pub fn choose_workspace() -> io::Result<Option<std::path::PathBuf>> {
     linux::choose_workspace()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(
+    feature = "gtk-ui",
+    not(feature = "native-ui"),
+    not(target_os = "linux")
+))]
 pub fn choose_workspace() -> io::Result<Option<std::path::PathBuf>> {
-    Err(io::Error::other("nokin v1 supports Linux only"))
+    Err(io::Error::other("the GTK frontend supports Linux only"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "native-ui")]
+pub fn run(workspace: &Workspace) -> io::Result<()> {
+    native::run(workspace)
+}
+
+#[cfg(all(feature = "gtk-ui", not(feature = "native-ui"), target_os = "linux"))]
 pub fn run(workspace: &Workspace) -> io::Result<()> {
     linux::run(workspace)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(
+    feature = "gtk-ui",
+    not(feature = "native-ui"),
+    not(target_os = "linux")
+))]
 pub fn run(_workspace: &Workspace) -> io::Result<()> {
-    Err(io::Error::other("nokin v1 supports Linux only"))
+    Err(io::Error::other("the GTK frontend supports Linux only"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gtk-ui", not(feature = "native-ui"), target_os = "linux"))]
 mod linux {
     use std::ffi::{CStr, CString, c_char, c_int, c_void};
     use std::fs;
@@ -500,12 +527,13 @@ mod linux {
             );
             editor.set_text(contents)?;
             let palette = crate::theme::load(&self.settings.editor.theme);
-            editor.apply_palette(&palette);
+            let scintilla_palette = scintilla::Palette::from(&palette);
+            editor.apply_palette(&scintilla_palette);
             if !is_binary && let Some(path) = &path {
                 if is_c_file(&path) {
-                    editor.configure_c_lexer(&palette)?;
+                    editor.configure_c_lexer(&scintilla_palette)?;
                 } else if let Some(lexer) = lexer_for_path(&path) {
-                    editor.configure_basic_lexer(lexer, &palette)?;
+                    editor.configure_basic_lexer(lexer, &scintilla_palette)?;
                 }
             }
             // SAFETY: the editor widget and AppState remain alive for the GTK loop.
@@ -612,12 +640,15 @@ mod linux {
                     unsafe { gtk_label_set_text(self.tabs[index].label, tab_name.as_ptr()) };
                     self.tabs[index].path = Some(path.clone());
                     let palette = crate::theme::load(&self.settings.editor.theme);
+                    let scintilla_palette = scintilla::Palette::from(&palette);
                     if is_c_file(&path) {
-                        self.tabs[index].editor.configure_c_lexer(&palette)?;
+                        self.tabs[index]
+                            .editor
+                            .configure_c_lexer(&scintilla_palette)?;
                     } else if let Some(lexer) = lexer_for_path(&path) {
                         self.tabs[index]
                             .editor
-                            .configure_basic_lexer(lexer, &palette)?;
+                            .configure_basic_lexer(lexer, &scintilla_palette)?;
                     }
                     path
                 }
@@ -1132,6 +1163,7 @@ mod linux {
 
         fn apply_editor_settings(&self) -> io::Result<()> {
             let palette = crate::theme::load(&self.settings.editor.theme);
+            let scintilla_palette = scintilla::Palette::from(&palette);
             for tab in &self.tabs {
                 tab.editor.set_font(
                     32,
@@ -1143,12 +1175,13 @@ mod linux {
                     self.settings.editor.tab_width,
                     self.settings.editor.insert_spaces,
                 );
-                tab.editor.apply_palette(&palette);
+                tab.editor.apply_palette(&scintilla_palette);
                 if let Some(path) = &tab.path {
                     if is_c_file(path) {
                         tab.editor.refresh_c_function_highlighting()?;
                     } else if let Some(lexer) = lexer_for_path(path) {
-                        tab.editor.configure_basic_lexer(lexer, &palette)?;
+                        tab.editor
+                            .configure_basic_lexer(lexer, &scintilla_palette)?;
                     }
                 }
             }
